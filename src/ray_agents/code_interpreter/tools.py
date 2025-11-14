@@ -32,6 +32,7 @@ def _get_or_create_executor(
     image: str = DEFAULT_IMAGE,
     dockerfile: str | None = None,
     environment: dict[str, str] | None = None,
+    volumes: dict[str, dict[str, str]] | None = None,
 ) -> ray.actor.ActorHandle:
     """Get existing executor or create new one for session"""
     actor_name = f"code-executor-{session_id}"
@@ -53,6 +54,7 @@ def _get_or_create_executor(
             image=image,
             dockerfile=dockerfile,
             environment=environment,
+            volumes=volumes,
         )
         return cast(ray.actor.ActorHandle, executor)
 
@@ -64,6 +66,7 @@ def execute_code(
     image: str = DEFAULT_IMAGE,
     dockerfile: str | None = None,
     environment: dict[str, str] | None = None,
+    volumes: dict[str, dict[str, str]] | None = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> ExecutionResult | ExecutionError:
     """
@@ -75,6 +78,8 @@ def execute_code(
         image: Docker image to use (default: python:3.11-slim)
         dockerfile: Custom Dockerfile string (optional, overrides image)
         environment: Environment variables for container
+        volumes: Volume mounts for container. Format:
+            {'/host/path': {'bind': '/container/path', 'mode': 'ro'}}
         timeout: Execution timeout in seconds
 
     Returns:
@@ -90,6 +95,11 @@ def execute_code(
         >>> result = ray.get(execute_code.remote("print(x)", session_id="my-session"))
         >>> print(result["stdout"])
         42
+
+        >>> # With volume mounts
+        >>> volumes = {'/host/data': {'bind': '/mnt/data', 'mode': 'ro'}}
+        >>> ray.get(execute_code.remote("import os; print(os.listdir('/mnt/data'))",
+        ...                              session_id="my-session", volumes=volumes))
     """
     # Generate session_id if not provided
     if session_id is None:
@@ -99,7 +109,9 @@ def execute_code(
         logger.info(f"Using provided session_id: {session_id}")
 
     # Get or create executor for session
-    executor = _get_or_create_executor(session_id, image, dockerfile, environment)
+    executor = _get_or_create_executor(
+        session_id, image, dockerfile, environment, volumes
+    )
 
     # Execute code
     logger.info(f"Executing code in session {session_id}: {code[:50]}...")

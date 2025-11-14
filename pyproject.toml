@@ -11,7 +11,10 @@ requires-python = ">=3.12"
 dependencies = [
     "langchain-openai>=0.3.35",
     "langgraph>=0.6.10",
-    "ray>=2.49.2",
+    "ray[serve]>=2.49.2",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.100.0",
 ]
 
 [project.optional-dependencies]

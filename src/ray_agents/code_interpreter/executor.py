@@ -58,6 +58,7 @@ class CodeInterpreterExecutor:
         image: str = DEFAULT_IMAGE,
         dockerfile: str | None = None,
         environment: dict[str, str] | None = None,
+        volumes: dict[str, dict[str, str]] | None = None,
     ):
         """
         Initialize code executor with Docker container.
@@ -67,15 +68,23 @@ class CodeInterpreterExecutor:
             image: Docker image to use (default: python:3.12-slim)
             dockerfile: Custom Dockerfile string (optional)
             environment: Environment variables for container
+            volumes: Volume mounts for container. Format:
+                {'/host/path': {'bind': '/container/path', 'mode': 'ro'}}
         """
         self.session_id = session_id
         self.image = image
         self.dockerfile = dockerfile
         self.environment = environment or {}
+        self.volumes = volumes or {}
         self.container = None
         self.client = None
         self.execution_count = 0
         self.created_at = time.time()
+
+        # Validate volume paths exist
+        for host_path in self.volumes.keys():
+            if not os.path.exists(host_path):
+                logger.warning(f"Volume mount host path does not exist: {host_path}")
 
         logger.info(f"CodeInterpreterExecutor initialized for session {session_id}")
 
@@ -475,6 +484,7 @@ with open('{SESSION_STATE_PATH}', 'wb') as f:
                 cpu_period=CPU_PERIOD,
                 network_mode=NETWORK_MODE,
                 environment=self.environment,
+                volumes=self.volumes if self.volumes else None,
                 remove=False,  # Keep for session persistence
             )
             logger.info(f"Session {self.session_id}: Container created successfully")
@@ -508,6 +518,7 @@ with open('{SESSION_STATE_PATH}', 'wb') as f:
                         cpu_period=CPU_PERIOD,
                         network_mode=NETWORK_MODE,
                         environment=self.environment,
+                        volumes=self.volumes if self.volumes else None,
                         remove=False,
                     )
             else:
