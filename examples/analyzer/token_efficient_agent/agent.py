@@ -1,5 +1,4 @@
-"""
-Token-Efficient Agent with Autonomous Code Execution
+"""Token-Efficient Agent with Autonomous Code Execution
 
 This agent autonomously explores and executes Python code to analyze datasets.
 It uses OpenAI's function calling to execute code as a discoverable tool.
@@ -74,7 +73,7 @@ class TokenEfficientAgent:
         self.model = model
         self.max_iterations = max_iterations
 
-        # Setup volume mounts (only servers, datasets accessed via MCP)
+        # Setup volume mounts (only servers - datasets accessed via MCP)
         self.datasets_path = str(Path(datasets_path).resolve())
         self.servers_path = str(Path(servers_path).resolve())
         self.volumes = {
@@ -89,30 +88,27 @@ class TokenEfficientAgent:
 
         self.conversation_history: list[dict[str, Any]] = []
 
-        self.system_prompt = f"""You are a data analysis assistant that autonomously explores and analyzes data.
-
-Resources:
-- /mnt/servers/ - MCP tool modules
-- Datasets at {self.datasets_path} (on host machine)
-- Libraries: pandas, numpy, matplotlib
-
-CRITICAL:
-- Datasets are NOT in the container filesystem
-- DO NOT use os.listdir(), open(), or direct file I/O for {self.datasets_path}
-- MUST use MCP tools from /mnt/servers/filesystem/ (list_directory, read_file, etc.)
-- Example: from servers.filesystem import list_directory; await list_directory("{self.datasets_path}")
+        self.system_prompt = """You are a data analysis assistant that autonomously explores and analyzes data.
 
 Environment:
-- Headless (no GUI)
-- Always print() results
-- Variables persist
+- Sandboxed container with Python, pandas, numpy, matplotlib
+- /mnt/servers/ contains MCP tool modules you can import and use
+- Variables and imports persist across executions
+- Headless (no GUI) - always print() results you want to see
 
-Workflow:
-1. Import MCP filesystem tools: sys.path.append('/mnt'); from servers.filesystem import ...
-2. Use MCP tools with asyncio to access {self.datasets_path}
-3. Analyze and answer
+Key points:
+- Datasets are NOT in the container filesystem
+- Explore /mnt/servers/ to discover available MCP tools
+- To import MCP modules: sys.path.append('/mnt') then import servers.MODULE_NAME
+- MCP tools are async functions - you MUST use asyncio.run() to call them
+  Example: result = asyncio.run(some_async_function())
 
-Work iteratively and focus on answering the question."""
+Important reminders:
+- Once you import a module or define a variable, it persists - don't re-import unnecessarily
+- Always check the type/structure of returned data before using it (e.g., print type or keys)
+- If you get a NameError, the module wasn't imported in the current or previous execution
+
+Start by exploring what tools are available, then figure out how to access and analyze data."""
 
     def chat(self, user_message: str) -> Generator[str, None, None]:
         """Chat with the agent - it will autonomously explore and execute code.

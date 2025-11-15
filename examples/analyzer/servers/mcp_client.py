@@ -175,21 +175,21 @@ class MCPClient:
         self.stop()
 
 
-_filesystem_client: MCPClient | None = None
+_datasets_client: MCPClient | None = None
 
 
-def get_filesystem_client(http_endpoint: str | None = None) -> MCPClient:
-    """Get or create the filesystem MCP client.
+def get_datasets_client(http_endpoint: str | None = None) -> MCPClient:
+    """Get or create the datasets MCP client.
 
     Args:
         http_endpoint: HTTP endpoint for MCP server (e.g., 'http://localhost:8265/mcp')
                       If None, will try to detect Ray Serve endpoint
 
     Returns:
-        MCPClient instance for the filesystem server
+        MCPClient instance for the datasets server
     """
-    global _filesystem_client
-    if _filesystem_client is None:
+    global _datasets_client
+    if _datasets_client is None:
         if http_endpoint is None:
             import os
 
@@ -207,9 +207,9 @@ def get_filesystem_client(http_endpoint: str | None = None) -> MCPClient:
             else:
                 http_endpoint = "http://localhost:8265/mcp"
 
-        _filesystem_client = MCPClient(http_endpoint=http_endpoint)
+        _datasets_client = MCPClient(http_endpoint=http_endpoint)
 
-    return _filesystem_client
+    return _datasets_client
 
 
 async def call_mcp_tool(
@@ -221,15 +221,15 @@ async def call_mcp_tool(
     with MCP servers.
 
     Args:
-        server: Name of the MCP server (e.g., 'filesystem')
+        server: Name of the MCP server (e.g., 'datasets')
         tool_name: Name of the tool to call
         arguments: Arguments for the tool
 
     Returns:
         Result from the tool execution
     """
-    if server == "filesystem":
-        client = get_filesystem_client()
+    if server == "datasets":
+        client = get_datasets_client()
         return client.call_tool(tool_name, arguments)
     else:
         raise ValueError(f"Unknown MCP server: {server}")
