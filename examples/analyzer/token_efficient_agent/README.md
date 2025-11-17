@@ -147,9 +147,9 @@ Add to `/etc/docker/daemon.json`:
 {
   "runtimes": {
     "runsc": {
-      "path": "/usr/local/bin/runsc",
+      "path": "/var/lib/docker/volumes/runsc-bin/_data/runsc",
       "runtimeArgs": [
-        "--fsgofer-host-uds"
+        "--host-uds=all"
       ]
     }
   }
@@ -166,7 +166,7 @@ sudo systemctl restart docker
 ```
 
 **Why this is needed:**
-- `--fsgofer-host-uds`: Allows gVisor containers to connect to Unix sockets on the host
+- `--host-uds=all`: Allows gVisor containers to connect to Unix sockets on the host
 - Enables `network_mode: none` (complete isolation) + Unix socket communication with sidecar
 - Sidecar enforces MCP allowlist while sandbox has zero network access
 
