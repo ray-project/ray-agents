@@ -4,11 +4,12 @@ This runs the MCP datasets server as a Ray Serve deployment,
 providing HTTP access to dataset operations.
 """
 
+import os
 from pathlib import Path
 from typing import Any
 
 import ray
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from ray import serve
 
@@ -116,7 +117,7 @@ class MCPServeDeployment:
         self.server = DatasetsMCPServer(datasets_directory)
 
     @app.post("/tools/call")
-    async def call_tool(self, request: dict) -> JSONResponse:
+    async def call_tool(self, request: Request) -> JSONResponse:
         """Handle MCP tool calls via HTTP.
 
         Request format:
@@ -126,8 +127,9 @@ class MCPServeDeployment:
         }
         """
         try:
-            tool_name = request.get("tool")
-            arguments = request.get("arguments", {})
+            body = await request.json()
+            tool_name = body.get("tool")
+            arguments = body.get("arguments", {})
 
             if not tool_name:
                 raise HTTPException(status_code=400, detail="Missing 'tool' field")
@@ -194,10 +196,11 @@ def start_mcp_server(datasets_directory: str, port: int = 8265) -> Any | None:
 
 if __name__ == "__main__":
     examples_dir = Path(__file__).parent
-    datasets_dir = str(examples_dir / "datasets")
+    datasets_dir = os.getenv("DATASETS_DIR", str(examples_dir / "datasets"))
+    port = int(os.getenv("MCP_PORT", "8000"))
 
-    print("Starting MCP Datasets Server...")
-    start_mcp_server(datasets_dir)
+    print(f"Starting MCP Datasets Server on port {port}...")
+    start_mcp_server(datasets_dir, port=port)
 
     print("\nServer is running. Press Ctrl+C to stop.")
     try:
