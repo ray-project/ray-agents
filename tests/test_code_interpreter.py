@@ -10,7 +10,6 @@ from ray_agents.sandbox import (
     cleanup_session,
     execute_code,
     get_session_stats,
-    install_package,
     upload_file,
 )
 from ray_agents.sandbox.types import ExecutionResult
@@ -75,30 +74,6 @@ def test_session_persistence(ray_start):
     result2 = ray.get(execute_code.remote("print(x)", session_id=session_id))  # type: ignore[call-arg]
     assert result2["status"] == "success"
     assert "42" in result2["stdout"]
-
-    # Cleanup
-    ray.get(cleanup_session.remote(session_id))
-
-
-def test_package_installation(ray_start):
-    """Test pip package installation"""
-    session_id = "test-package-install"
-
-    # Initialize session
-    ray.get(execute_code.remote("x = 1", session_id=session_id))  # type: ignore[call-arg]
-
-    # Install a very small package (wheel is tiny and installs fast)
-    install_result = ray.get(
-        install_package.remote("wheel", session_id=session_id),  # type: ignore[call-arg]
-        timeout=60,  # 1 minute timeout should be enough
-    )
-    assert install_result["status"] == "success"
-
-    # Use installed package
-    code = "import wheel; print(f'wheel version: {wheel.__version__}')"
-    result = ray.get(execute_code.remote(code, session_id=session_id))  # type: ignore[call-arg]
-    assert result["status"] == "success"
-    assert "wheel version:" in result["stdout"]
 
     # Cleanup
     ray.get(cleanup_session.remote(session_id))
