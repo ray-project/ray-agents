@@ -65,14 +65,6 @@ The CLI automatically:
 2. Creates sidecar proxy container when needed
 3. Connects sandbox to datasets via MCP
 
-### Token Efficiency
-
-**Traditional**: Send 100KB CSV in every prompt = 150K tokens across 3 turns
-
-**This approach**: Generate code that loads CSV once = 8K tokens across 3 turns
-
-**Savings: 94%**
-
 ### Example Interaction
 
 ```
