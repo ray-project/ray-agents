@@ -10,13 +10,15 @@ export const META_REPO = "cursor.repo"
 // Set by the spawn hook while it resumes and relaunches a paused sandbox, so the
 // monitor leaves it alone until the new worker is up (see MONITOR_GRACE_SECONDS).
 export const META_LAUNCHING = "cursor.launching"
+// Set by the monitor while it pauses or deletes a sandbox; the spawn hook
+// treats a fresh marker as "not mine to reuse" and starts a new sandbox.
+export const META_RECYCLING = "cursor.recycling"
 
 export const STATE_DIR = "/var/lib/cursor-worker"
 const PIDFILE = `${STATE_DIR}/worker.pid`
 const EXITFILE = `${STATE_DIR}/worker.exit`
 const LOGFILE = `${STATE_DIR}/worker.log`
 
-const POOL_NAME_RE = /^[A-Za-z0-9._-]+$/
 const STARTUP_GRACE_MS = 5000
 
 function flag(name, fallback) {
@@ -28,6 +30,9 @@ function flag(name, fallback) {
 // Sandboxes resolve DNS through these public resolvers. A strict allowlist has
 // to include them or nothing resolves. Single IPs are written as /32.
 const DNS_RESOLVERS = ["1.1.1.1/32", "8.8.8.8/32"]
+// The platform's own hosts must stay reachable under a deny-all rule; the
+// networking docs list this as a hard requirement for SDK connectivity.
+const PLATFORM_HOSTS = ["*.superserve.ai"]
 const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/
 
 function egressAllowlist(raw) {
@@ -37,7 +42,7 @@ function egressAllowlist(raw) {
     .filter(Boolean)
     .map((e) => (IPV4_RE.test(e) ? `${e}/32` : e))
   if (entries.length === 0) return []
-  return [...new Set([...DNS_RESOLVERS, ...entries])]
+  return [...new Set([...DNS_RESOLVERS, ...PLATFORM_HOSTS, ...entries])]
 }
 
 export const config = {
@@ -62,7 +67,10 @@ if ! test -s "${PIDFILE}"; then
   exit 0
 fi
 pid=$(head -n1 "${PIDFILE}" 2>/dev/null | tr -d '[:space:]')
-if kill -0 "$pid" 2>/dev/null; then
+# The launcher runs the worker under setsid, so the recorded pid is also the
+# process group id. The group counts as running while any member is alive,
+# even if the leader has already gone.
+if kill -0 "$pid" 2>/dev/null || pgrep -g "$pid" >/dev/null 2>&1; then
   printf '{"state":"running","pid":%s,"exit_code":null}\\n' "$pid"
 else
   printf '{"state":"dead","pid":%s,"exit_code":null}\\n' "$pid"
@@ -71,16 +79,32 @@ fi
 
 const STOP_SCRIPT = `#!/bin/bash
 set +e
+# Same critical section as launch.sh: a stop and a launch never interleave,
+# so a launch cannot lose its fresh pid file to a concurrent stop.
+exec 9>"${STATE_DIR}/launch.lock"
+flock -w 30 9 || { echo "stop: could not acquire lock" >&2; exit 1; }
 if test -s "${PIDFILE}"; then
   pid=$(head -n1 "${PIDFILE}" 2>/dev/null | tr -d '[:space:]')
-  if test -n "$pid" && kill -0 "$pid" 2>/dev/null; then
-    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
-    kill -TERM "-\${pgid:-$pid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      kill -0 "$pid" 2>/dev/null || break
+  # pid is the process group id (see launch.sh). Stop the whole group and
+  # wait for every member, not just the leader: a child that outlives the
+  # wrapper must not be reported as stopped.
+  if test -n "$pid"; then
+    kill -TERM -- "-$pid" 2>/dev/null
+    for i in $(seq 1 20); do
+      pgrep -g "$pid" >/dev/null 2>&1 || break
       sleep 0.5
     done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "-\${pgid:-$pid}" 2>/dev/null
+    if pgrep -g "$pid" >/dev/null 2>&1; then
+      kill -KILL -- "-$pid" 2>/dev/null
+      for i in $(seq 1 10); do
+        pgrep -g "$pid" >/dev/null 2>&1 || break
+        sleep 0.5
+      done
+    fi
+    if pgrep -g "$pid" >/dev/null 2>&1; then
+      echo "stop: process group $pid still has live members" >&2
+      exit 1
+    fi
   fi
 fi
 rm -f "${PIDFILE}" "${EXITFILE}"
@@ -96,8 +120,33 @@ export HOME="\${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 mkdir -p "${STATE_DIR}" /workspace
 cd /workspace
+# Serialize launches: the check below and the start after it must be one
+# critical section, or two launchers can both see no live pid and start two
+# workers. The lock is held by this script only (the worker closes fd 9).
+exec 9>"${STATE_DIR}/launch.lock"
+flock -w 30 9 || { echo "launch: could not acquire lock" >&2; exit 1; }
+# Idempotent: if a worker is already running, report its pid and leave it
+# alone, so two launchers racing on one sandbox can never start two workers.
+if test -s "${PIDFILE}"; then
+  existing=$(head -n1 "${PIDFILE}" 2>/dev/null | tr -d '[:space:]')
+  # Match the probe: the group counts as live while any member is alive,
+  # even if the setsid leader has already gone.
+  if test -n "$existing" && { kill -0 "$existing" 2>/dev/null || pgrep -g "$existing" >/dev/null 2>&1; }; then
+    if test -f "${EXITFILE}"; then
+      # The worker itself exited but a task left a process behind in its
+      # group. Nothing owns it any more: clear it and start the new worker.
+      kill -KILL -- "-$existing" 2>/dev/null || true
+      sleep 0.5
+    else
+      echo "$existing"
+      exit 0
+    fi
+  fi
+fi
 rm -f "${PIDFILE}" "${EXITFILE}"
-setsid bash -c 'bash "${RUNFILE}"; printf "%s\\n" "$?" > "${EXITFILE}"' > "${LOGFILE}" 2>&1 < /dev/null &
+# Before reporting the exit, reap anything a task left behind in the worker's
+# process group, so a written exit file always means the group is empty.
+setsid bash -c 'bash "${RUNFILE}"; code=$?; stragglers=$(pgrep -g $$ | grep -vx $$ || true); [ -n "$stragglers" ] && kill -KILL $stragglers 2>/dev/null; printf "%s\\n" "$code" > "${EXITFILE}"' > "${LOGFILE}" 2>&1 < /dev/null 9>&- &
 pid=$!
 printf "%s\\n" "$pid" > "${PIDFILE}"
 echo "$pid"
@@ -107,22 +156,29 @@ function runScript(workerCommand) {
   return `#!/bin/bash\nexec ${workerCommand}\n`
 }
 
+// Single-quote a value for run.sh so any pool name Cursor accepts is passed
+// through intact, spaces and shell metacharacters included.
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`
+}
+
 export function workerCommand(pool) {
-  if (!POOL_NAME_RE.test(pool)) throw new Error(`invalid pool name: ${pool}`)
-  const args = ["agent", "worker", "--pool", pool]
+  if (!pool) throw new Error("pool name is required")
+  const args = ["agent", "worker", "--pool", shellQuote(pool)]
   if (config.cloneGitRepos) args.push("--clone-git-repos")
   args.push("start")
   return args.join(" ")
 }
 
-// Env handed to the worker process. CURSOR_API_KEY is scoped to this command,
-// not the whole sandbox, so it is not visible to unrelated exec calls.
+// Env handed to the worker process. CURSOR_API_KEY is set on this command
+// rather than sandbox-wide, but the agent's commands share the worker's user
+// and can still read it: scope the service account to the pool.
 export function workerEnv({ workerId, workerName }) {
   const env = {
-    CURSOR_API_KEY: process.env.CURSOR_API_KEY,
     CURSOR_AGENT_WORKER_ID: workerId,
     CURSOR_WORKER_IDLE_RELEASE_TIMEOUT: config.idleReleaseTimeout,
   }
+  env.CURSOR_API_KEY = process.env.CURSOR_API_KEY
   if (workerName) env.CURSOR_WORKER_NAME = workerName
   for (const key of ["CURSOR_API_URL", "CURSOR_API_ENDPOINT"]) {
     if (process.env[key]) env[key] = process.env[key]
@@ -130,9 +186,16 @@ export function workerEnv({ workerId, workerName }) {
   return env
 }
 
+// A missing probe script is reported as its own state: the spawn hook died
+// after creating the sandbox but before installing the supervisor, and
+// nothing will ever start a worker there.
+const PROBE_COMMAND =
+  `if test -f ${STATE_DIR}/probe.sh; then bash ${STATE_DIR}/probe.sh; ` +
+  `else printf '{"state":"no_supervisor","pid":null,"exit_code":null}\\n'; fi`
+
 export async function workerState(sandbox) {
   try {
-    const result = await sandbox.commands.run(`bash ${STATE_DIR}/probe.sh`)
+    const result = await sandbox.commands.run(PROBE_COMMAND)
     const lines = result.stdout.trim().split("\n")
     if (lines.length > 0 && lines.at(-1)) return JSON.parse(lines.at(-1))
   } catch {
@@ -142,7 +205,13 @@ export async function workerState(sandbox) {
 }
 
 export async function stopWorker(sandbox) {
-  await sandbox.commands.run(`bash ${STATE_DIR}/stop.sh`)
+  // Fails loudly when any member of the worker's process group survives, so
+  // callers never release a claim over a worker that is still alive.
+  const result = await sandbox.commands.run(`bash ${STATE_DIR}/stop.sh`)
+  if (result.exitCode !== 0)
+    throw new Error(
+      `stop failed: ${(result.stderr || "").trim() || `exit ${result.exitCode}`}`,
+    )
 }
 
 export async function readLog(sandbox) {
@@ -190,6 +259,23 @@ const LIVE_STATUSES = new Set([
   "resuming",
 ])
 
+// Remove the relaunch marker only if it is still the one this attempt wrote.
+// Marker ownership is per attempt: a concurrent launcher may have replaced it
+// with a newer stamp, and that marker must survive until its owner clears it.
+export async function clearOwnMarker(sandbox, stamp) {
+  try {
+    // One read, one write from that same snapshot: the check and the removal
+    // must not be separated by a second read that could see a newer marker.
+    const info = await sandbox.getInfo()
+    if (info.metadata[META_LAUNCHING] !== stamp) return
+    const metadata = { ...info.metadata }
+    delete metadata[META_LAUNCHING]
+    await Sandbox.updateById(sandbox.id, { metadata })
+  } catch {
+    // Best effort; the marker expires with the grace period anyway.
+  }
+}
+
 // Merge metadata updates into the sandbox's existing tags. A null value
 // removes the key; update() replaces the whole map, so read first.
 export async function tagSandbox(sandbox, updates) {
@@ -221,6 +307,9 @@ async function cursorApi(path, { method = "GET", body } = {}) {
     },
   }
   if (body !== undefined) init.body = JSON.stringify(body)
+  // Bounded like the Python client: a hung Cursor endpoint must not stall
+  // the monitor loop indefinitely.
+  init.signal = AbortSignal.timeout(30_000)
   const res = await fetch(`${config.cursorEndpoint}${path}`, init)
   if (!res.ok)
     throw new Error(`${method} ${path} -> ${res.status} ${await res.text()}`)
@@ -229,12 +318,24 @@ async function cursorApi(path, { method = "GET", body } = {}) {
 }
 
 // Hand a claimed request back to the queue when the worker could not start.
-export function releaseClaim(requestId) {
-  return cursorApi(
-    `/v0/private-workers/claims/${encodeURIComponent(requestId)}/release`,
-    {
-      method: "POST",
-    },
+// Retried with backoff: a claim that stays attached to a worker that will
+// never connect sits idle until Cursor expires it. If every attempt fails,
+// the error names the request so the release can be done by hand.
+export async function releaseClaim(requestId, { attempts = 4 } = {}) {
+  const path = `/v0/private-workers/claims/${encodeURIComponent(requestId)}/release`
+  let lastError
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await cursorApi(path, { method: "POST" })
+    } catch (e) {
+      lastError = e
+      if (i < attempts - 1)
+        await new Promise((r) => setTimeout(r, 1000 * 2 ** i))
+    }
+  }
+  throw new Error(
+    `release of request=${requestId} failed after ${attempts} attempts (${lastError.message}); ` +
+      `release it manually: POST ${config.cursorEndpoint}${path}`,
   )
 }
 

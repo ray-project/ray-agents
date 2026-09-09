@@ -9,7 +9,7 @@ icon: "/logos/integrations/cursor.svg"
 
 With Self-Hosted Machines you decide which image the agent runs on, what it can reach, and what happens to the workspace when it's done. A Team Pool also means managing a fleet of machines, and Cursor's docs are clear about what that involves: keeping enough workers online, patching images, resetting machines between runs, scaling for bursts, and cleaning up after every session.
 
-Superserve gives you the control without having to manage a fleet of machines. Point Cursor's worker controller at the spawn hook in this guide, and every Cloud Agent that lands in your pool gets its own sandbox: created for that request, booted from a template you built, with outbound network access only to the hosts you allow, and deleted the moment the worker exits. Follow-ups don't have to start cold either. A sandbox can pause between turns at no compute cost and resume in under 50ms with the checkout and caches intact, which is the hibernation model Cursor designed pools around. Nothing runs before a request arrives, and nothing lingers after.
+Superserve gives you the control without having to manage a fleet of machines. Point Cursor's worker controller at the spawn hook in this guide, and every Cloud Agent that lands in your pool gets its own sandbox: created for that request, booted from a template you built, limited to an egress allowlist if you set one, and deleted the moment the worker exits. Follow-ups don't have to start cold either. A sandbox can pause between turns at no compute cost and resume in under 50ms with the checkout and caches intact, which is the hibernation model Cursor designed pools around. Nothing runs before a request arrives, and nothing lingers after.
 
 This is for you if:
 
@@ -242,9 +242,14 @@ What the hook does on each claim:
 
 <Warning>
   Keep `SUPERSERVE_API_KEY` on the controller host only - it never enters a
-  sandbox. `CURSOR_API_KEY` is passed on the launch command rather than as a
-  sandbox-wide env var, so only the worker's process tree can read it.
+  sandbox. `CURSOR_API_KEY` does: the worker authenticates to Cursor with it,
+  and the agent's commands run as the same user as the worker, so anything the
+  worker can read, a task's commands can read too. That is Cursor's worker
+  model on every platform. Scope the service account to one pool, and treat
+  the pool as one trust boundary.
 </Warning>
+
+Delivering this key as a bound Superserve [secret](/secrets/overview) is not offered here yet: the worker's authentication format has not been verified against the secrets proxy, so the guide ships the key to the worker process as an environment variable.
 
 ## Send a task
 
@@ -289,6 +294,17 @@ Cursor supports hibernation: a pool can declare a reconnect window, and Cursor h
   </Step>
 </Steps>
 
+<Note>
+  The spawn hook and the monitor coordinate through sandbox metadata tags
+  (`cursor.launching`, `cursor.recycling`), and metadata updates have no
+  compare-and-swap. Each side writes its tag and re-reads before acting, the
+  launch script holds a lock so two launchers can never start two workers, and
+  claims are released only after a worker is confirmed gone. What remains is a
+  window of one API round-trip in which a recycle and a relaunch can overlap;
+  the outcome in that case is a follow-up that Cursor re-queues, never two
+  workers on one request.
+</Note>
+
 ### Warm workers
 
 For pools where startup latency matters, run the controller with `--warm-idle <count>`. It keeps that many idle workers connected ahead of demand and Cursor assigns requests to them directly. The same spawn hook serves this mode; it runs without a request id.
@@ -302,7 +318,7 @@ Sandboxes can reach any public IP by default. A worker needs outbound HTTPS to:
 - `cloud-agent-artifacts.s3.us-east-1.amazonaws.com` - screenshot and recording uploads
 - The git host, package registries, and any internal services the agent's work touches
 
-To restrict egress, set `CURSOR_WORKER_ALLOW_OUT` to a comma-separated list of hosts and CIDRs. The spawn hook creates sandboxes that allow those, plus the sandbox's DNS resolvers (`1.1.1.1/32` and `8.8.8.8/32`, without which nothing resolves), and deny everything else. Write single IPs as `/32`; the hook does this for you if you leave the suffix off. See [Network rules](/sandbox/networking) for the format and the [network log](/sandbox/network-log) for every HTTP and HTTPS connection a worker attempted, allowed or blocked.
+To restrict egress, set `CURSOR_WORKER_ALLOW_OUT` to a comma-separated list of hosts and CIDRs. The spawn hook creates sandboxes that allow those, plus the sandbox's DNS resolvers (`1.1.1.1/32` and `8.8.8.8/32`, without which nothing resolves) and `*.superserve.ai` (which the SDK needs to reach the sandbox), and deny everything else. Write single IPs as `/32`; the hook does this for you if you leave the suffix off. See [Network rules](/sandbox/networking) for the format and the [network log](/sandbox/network-log) for every HTTP and HTTPS connection a worker attempted, allowed or blocked.
 
 No inbound ports are required. The worker connects out to Cursor, and Superserve reaches the sandbox through its own control plane.
 
@@ -330,6 +346,7 @@ The scripts read these from `.env`:
 | `CURSOR_WORKER_ALLOW_OUT`            | unset             | Comma-separated egress allowlist. Unset keeps the open default                                                                 |
 | `MONITOR_POLL_SECONDS`               | `15`              | Monitor sweep interval                                                                                                         |
 | `MONITOR_GRACE_SECONDS`              | `120`             | Minimum sandbox age before the monitor may recycle it, so fresh spawns are left alone                                          |
+| `MONITOR_WAKE_CONCURRENCY`           | `4`               | How many hibernated sandboxes the monitor wakes at once when follow-ups arrive in a burst |
 
 The controller sets `CURSOR_AGENT_WORKER_ID`, `CURSOR_REQUEST_ID`, and `CURSOR_WORKER_NAME` on each spawn. Leave them out of `.env`.
 
