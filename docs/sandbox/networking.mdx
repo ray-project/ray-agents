@@ -7,7 +7,9 @@ description: Lock down sandbox egress to specific CIDRs or domains with allow an
 By default, a sandbox can reach any public IP on the internet. The platform always blocks egress to private, link-local, and loopback ranges regardless of your allow rules. Use `network` rules to narrow the allowlist further.
 
 <Tip>
-Rules control what a sandbox **may** reach. To see what it **actually** reached over HTTP and HTTPS on ports 80 and 443 — every such connection, allowed or blocked — use the [network log](/sandbox/network-log).
+  Rules control what a sandbox **may** reach. To see what it **actually**
+  reached over HTTP and HTTPS on ports 80 and 443 — every such connection,
+  allowed or blocked — use the [network log](/sandbox/network-log).
 </Tip>
 
 ## Allow specific destinations
@@ -42,18 +44,28 @@ sandbox = Sandbox.create(
     ),
 )
 ```
+
 </CodeGroup>
 
 <Warning>
-A deny-all rule also blocks DNS. Sandboxes resolve names through `1.1.1.1` and `8.8.8.8`, so a strict allowlist must let the sandbox reach at least one of them or nothing resolves - not even the domains you allowed. The examples allow both so a resolver outage doesn't take DNS down with it. Domain rules are matched on the connection, not on the lookup, so allowing `api.openai.com` does not by itself let the sandbox look it up.
+  A deny-all rule also blocks DNS. Sandboxes resolve names through `1.1.1.1` and
+  `8.8.8.8`, so an allowlist that contains domain rules, or whose workload looks
+  up hostnames, must let the sandbox reach at least one of them or nothing
+  resolves - not even the domains you allowed. The examples allow both so a
+  resolver outage doesn't take DNS down with it. An allowlist made only of IPs
+  and CIDRs has no such need and is tighter without them: DNS is an outbound
+  channel like any other, and an allowed resolver can carry data in queries for
+  a domain no rule permits. Domain rules are matched on the connection, not on
+  the lookup, so allowing `api.openai.com` does not by itself let the sandbox
+  look it up.
 </Warning>
 
 ## Rule format
 
-| Field | Accepts | Notes |
-|---|---|---|
+| Field                    | Accepts              | Notes                                                                                                                                                                                                                                                                                          |
+| ------------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `allowOut` / `allow_out` | IPs, CIDRs + domains | Domains support wildcards (`*.example.com`). A wildcard matches subdomains at any depth but not the bare domain — `*.example.com` does not match `example.com`; list both if you need the apex. A bare IP is stored and applied as a single-host prefix: `1.1.1.1` reads back as `1.1.1.1/32`. |
-| `denyOut` / `deny_out` | IPs and CIDRs only | Use `0.0.0.0/0` to deny the entire internet and rely on `allowOut` for exceptions. Domains are not accepted here. |
+| `denyOut` / `deny_out`   | IPs and CIDRs only   | Use `0.0.0.0/0` to deny the entire internet and rely on `allowOut` for exceptions. Domains are not accepted here.                                                                                                                                                                              |
 
 Allow rules take precedence over deny rules when they overlap.
 
@@ -79,8 +91,10 @@ sandbox.update(
     ),
 )
 ```
+
 </CodeGroup>
 
 <Warning>
-Blocking `*.superserve.ai` will break the SDK's ability to communicate with the sandbox.
+  Blocking `*.superserve.ai` will break the SDK's ability to communicate with
+  the sandbox.
 </Warning>

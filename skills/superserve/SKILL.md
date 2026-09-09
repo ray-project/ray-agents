@@ -420,12 +420,13 @@ ideal for restricting what an agent or untrusted code can reach.
 | Field                    | Accepts                  | Notes                                                                                                                                        |
 | ------------------------ | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `allowOut` / `allow_out` | IPs, CIDRs **+ domains** | Wildcards (`*.example.com`) match subdomains at any depth but **not the apex** — list both if you need it. A bare IP is stored as its `/32`. |
-| `denyOut` / `deny_out`   | **CIDRs only**           | `0.0.0.0/0` denies the whole internet; allow exceptions via `allowOut`.                                                                      |
+| `denyOut` / `deny_out`   | IPs and CIDRs only       | `0.0.0.0/0` denies the whole internet; allow exceptions via `allowOut`. A bare IP is stored as its `/32`; domains are not accepted.          |
 
 Allow rules win over deny on overlap, so the strict pattern is **deny-all + allowlist**.
-**A deny-all rule also blocks DNS:** sandboxes resolve through `1.1.1.1` and `8.8.8.8`, so
-every strict allowlist must include at least one of them (`1.1.1.1/32`, `8.8.8.8/32`) or no
-hostname resolves, not even the allowed ones. Egress is editable live via `update({ network })`
+**A deny-all rule also blocks DNS:** sandboxes resolve through `1.1.1.1` and `8.8.8.8`, so an
+allowlist with domain rules (or a workload that looks up hostnames) must include at least one of
+them (`1.1.1.1/32`, `8.8.8.8/32`) or no hostname resolves, not even the allowed ones. An
+IP/CIDR-only allowlist should leave them out: an allowed resolver is an outbound channel too. Egress is editable live via `update({ network })`
 on an `active` sandbox (409 while paused). **Never block `*.superserve.ai`** — it breaks the
 SDK↔sandbox connection.
 
