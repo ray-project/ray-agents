@@ -375,7 +375,11 @@ await Secret.create({
 const sandbox = await Sandbox.create({
   name: "research-agent",
   secrets: { ANTHROPIC_API_KEY: "anthropic-prod" },
-  network: { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] },
+  // Deny-all also blocks DNS: allow the sandbox resolvers or nothing resolves.
+  network: {
+    allowOut: ["1.1.1.1/32", "8.8.8.8/32", "api.anthropic.com"],
+    denyOut: ["0.0.0.0/0"],
+  },
 })
 ```
 
@@ -387,7 +391,11 @@ Secret.create(name="anthropic-prod", value=os.environ["ANTHROPIC_API_KEY"], prov
 sandbox = Sandbox.create(
     name="research-agent",
     secrets={"ANTHROPIC_API_KEY": "anthropic-prod"},
-    network=NetworkConfig(allow_out=["api.anthropic.com"], deny_out=["0.0.0.0/0"]),
+    # Deny-all also blocks DNS: allow the sandbox resolvers or nothing resolves.
+    network=NetworkConfig(
+        allow_out=["1.1.1.1/32", "8.8.8.8/32", "api.anthropic.com"],
+        deny_out=["0.0.0.0/0"],
+    ),
 )
 ```
 
@@ -409,20 +417,29 @@ By default a sandbox reaches any **public** IP; the platform **always** blocks p
 link-local, and loopback ranges (non-overridable). `network` rules only _narrow_ egress —
 ideal for restricting what an agent or untrusted code can reach.
 
-| Field                    | Accepts             | Notes                                                                                                      |
-| ------------------------ | ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `allowOut` / `allow_out` | CIDRs **+ domains** | Wildcards (`*.example.com`) match subdomains at any depth but **not the apex** — list both if you need it. |
-| `denyOut` / `deny_out`   | **CIDRs only**      | `0.0.0.0/0` denies the whole internet; allow exceptions via `allowOut`.                                    |
+| Field                    | Accepts                  | Notes                                                                                                                                        |
+| ------------------------ | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allowOut` / `allow_out` | IPs, CIDRs **+ domains** | Wildcards (`*.example.com`) match subdomains at any depth but **not the apex** — list both if you need it. A bare IP is stored as its `/32`. |
+| `denyOut` / `deny_out`   | **CIDRs only**           | `0.0.0.0/0` denies the whole internet; allow exceptions via `allowOut`.                                                                      |
 
 Allow rules win over deny on overlap, so the strict pattern is **deny-all + allowlist**.
-Egress is editable live via `update({ network })`. **Never block `*.superserve.ai`** — it
-breaks the SDK↔sandbox connection.
+**A deny-all rule also blocks DNS:** sandboxes resolve through `1.1.1.1` and `8.8.8.8`, so
+every strict allowlist must include at least one of them (`1.1.1.1/32`, `8.8.8.8/32`) or no
+hostname resolves, not even the allowed ones. Egress is editable live via `update({ network })`
+on an `active` sandbox (409 while paused). **Never block `*.superserve.ai`** — it breaks the
+SDK↔sandbox connection.
 
 ```ts
 await Sandbox.create({
   name: "restricted",
   network: {
-    allowOut: ["api.openai.com", "*.github.com", "140.82.112.0/20"],
+    allowOut: [
+      "1.1.1.1/32",
+      "8.8.8.8/32",
+      "api.openai.com",
+      "*.github.com",
+      "140.82.112.0/20",
+    ],
     denyOut: ["0.0.0.0/0"],
   },
 })
@@ -432,7 +449,8 @@ await Sandbox.create({
 from superserve import Sandbox, NetworkConfig
 
 Sandbox.create(name="restricted", network=NetworkConfig(
-    allow_out=["api.openai.com", "*.github.com", "140.82.112.0/20"], deny_out=["0.0.0.0/0"]))
+    allow_out=["1.1.1.1/32", "8.8.8.8/32", "api.openai.com", "*.github.com", "140.82.112.0/20"],
+    deny_out=["0.0.0.0/0"]))
 ```
 
 ## Preview URLs — publish a port safely

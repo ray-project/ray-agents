@@ -172,15 +172,17 @@ export function registerLifecycleTools(
         allow_out: stringArray()
           .optional()
           .describe(
-            "Egress allow rules — domain patterns (e.g. 'api.github.com', '*.github.com') or CIDRs to permit. " +
+            "Egress allow rules — domain patterns (e.g. 'api.github.com', '*.github.com'), IPs, or CIDRs to permit. " +
               "This ADDS allowed destinations; on its own it does NOT block anything else. For a strict allowlist " +
-              "(deny everything except these), also pass deny_out: ['0.0.0.0/0'].",
+              "(deny everything except these), also pass deny_out: ['0.0.0.0/0'] AND include the sandbox DNS " +
+              "resolvers '1.1.1.1/32' and '8.8.8.8/32', or no hostname will resolve.",
           ),
         deny_out: stringArray()
           .optional()
           .describe(
             "Egress deny rules — CIDRs only (use '0.0.0.0/0' to deny all egress). Combine deny_out: ['0.0.0.0/0'] " +
-              "with allow_out to lock the sandbox down to just the allowed destinations.",
+              "with allow_out to lock the sandbox down to just the allowed destinations; deny-all also blocks DNS, " +
+              "so allow_out must include '1.1.1.1/32' and '8.8.8.8/32' for names to resolve.",
           ),
         preview_access: z
           .enum(["public", "private"])
@@ -586,13 +588,15 @@ export function registerLifecycleTools(
         allow_out: stringArray()
           .optional()
           .describe(
-            "Egress allow rules — domain patterns or CIDRs to permit. Adds allowed destinations; does NOT by " +
-              "itself block other egress. For a strict allowlist, also pass deny_out: ['0.0.0.0/0'].",
+            "Egress allow rules — domain patterns, IPs, or CIDRs to permit. Adds allowed destinations; does NOT by " +
+              "itself block other egress. For a strict allowlist, also pass deny_out: ['0.0.0.0/0'] and include the " +
+              "sandbox DNS resolvers '1.1.1.1/32' and '8.8.8.8/32', or no hostname will resolve.",
           ),
         deny_out: stringArray()
           .optional()
           .describe(
-            "Egress deny rules — CIDRs only ('0.0.0.0/0' denies all egress). Combine with allow_out to lock down egress.",
+            "Egress deny rules — CIDRs only ('0.0.0.0/0' denies all egress). Combine with allow_out to lock down egress; " +
+              "deny-all also blocks DNS, so allow_out must include '1.1.1.1/32' and '8.8.8.8/32' for names to resolve.",
           ),
         auto_delete_seconds: z
           .number()
