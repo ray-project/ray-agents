@@ -58,3 +58,57 @@ export async function getBillingSummary(): Promise<BillingSummaryResponse> {
     cache: "no-store",
   })
 }
+
+export type BillingUsageGranularity = "hourly" | "daily" | "weekly" | "monthly"
+/** Values accepted by the usage-series endpoint. */
+export type BillingUsageApiGranularity = "hour" | "day" | "week" | "month"
+const BILLING_USAGE_API_GRANULARITY = {
+  hourly: "hour",
+  daily: "day",
+  weekly: "week",
+  monthly: "month",
+} as const satisfies Record<BillingUsageGranularity, BillingUsageApiGranularity>
+/** Serialize the UI aggregation value to the enum accepted by the sandbox API. */
+export function toBillingUsageApiGranularity(
+  granularity: BillingUsageGranularity,
+): BillingUsageApiGranularity {
+  return BILLING_USAGE_API_GRANULARITY[granularity]
+}
+export interface BillingUsageSeriesResource {
+  usage: number
+  cost_usd: number
+  tracked: boolean
+  billable: boolean
+}
+export interface BillingUsageSeriesBucket {
+  start: string
+  end: string
+  cpu: BillingUsageSeriesResource
+  memory: BillingUsageSeriesResource
+  storage: BillingUsageSeriesResource
+  billed_total_usd: number
+}
+export interface BillingUsageSeriesResponse {
+  start: string
+  end: string
+  granularity: BillingUsageApiGranularity
+  timezone: string
+  buckets: BillingUsageSeriesBucket[]
+}
+export async function getBillingUsageSeries(params: {
+  start: string
+  end: string
+  granularity: BillingUsageGranularity
+  timezone: string
+}) {
+  const query = new URLSearchParams({
+    start: params.start,
+    end: params.end,
+    granularity: toBillingUsageApiGranularity(params.granularity),
+    timezone: params.timezone,
+  })
+  return apiClient<BillingUsageSeriesResponse>(
+    `/billing/usage-series?${query}`,
+    { cache: "no-store" },
+  )
+}

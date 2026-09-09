@@ -90,4 +90,29 @@ describe("billing api", () => {
       cache: "no-store",
     })
   })
+
+  it.each([
+    ["hourly", "hour"],
+    ["daily", "day"],
+    ["weekly", "week"],
+    ["monthly", "month"],
+  ] as const)(
+    "maps %s UI granularity to the sandbox %s enum",
+    async (granularity, apiGranularity) => {
+      apiClient.mockResolvedValue({ buckets: [] })
+      const { getBillingUsageSeries } = await import("./billing")
+
+      await getBillingUsageSeries({
+        start: "2026-01-01T00:00:00.000Z",
+        end: "2026-01-02T00:00:00.000Z",
+        granularity,
+        timezone: "UTC",
+      })
+
+      expect(apiClient).toHaveBeenCalledWith(
+        `/billing/usage-series?start=2026-01-01T00%3A00%3A00.000Z&end=2026-01-02T00%3A00%3A00.000Z&granularity=${apiGranularity}&timezone=UTC`,
+        { cache: "no-store" },
+      )
+    },
+  )
 })

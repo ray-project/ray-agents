@@ -22,6 +22,7 @@ const ALLOWED_PREFIXES = [
   "secrets",
   "providers",
   "billing/summary",
+  "billing/usage-series",
 ]
 
 function isTeamBillingPath(path: string): boolean {

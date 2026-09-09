@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, within } from "@testing-library/react"
+import { fireEvent, render, screen, within } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ApiError } from "@/lib/api/client"
 
 import PlanUsagePage from "./page"
+import { bucketLabel, formatUsageCost } from "./page-client"
 
 const useBillingSummary = vi.fn()
 const useBillingUsage = vi.fn()
@@ -255,6 +256,38 @@ describe("PlanUsagePage", () => {
     })
   })
 
+  it("never requests an invalid aggregation when the billing period changes", () => {
+    useBillingUsage.mockReturnValue({
+      data: { buckets: [], rows: [{ vcpu_seconds: 1 }] },
+      isPending: false,
+    })
+    const summary = useBillingSummary()
+    const view = renderPage()
+    fireEvent.change(screen.getByRole("combobox", { name: "View by" }), {
+      target: { value: "weekly" },
+    })
+    useBillingSummary.mockReturnValue({
+      ...summary,
+      data: {
+        ...summary.data,
+        billing_period: {
+          start: "2026-06-01T00:00:00.000Z",
+          end: "2026-06-03T00:00:00.000Z",
+        },
+      },
+    })
+    useBillingUsage.mockClear()
+    view.rerender(
+      <QueryClientProvider client={new QueryClient()}>
+        <PlanUsagePage />
+      </QueryClientProvider>,
+    )
+    expect(useBillingUsage).toHaveBeenCalled()
+    for (const call of useBillingUsage.mock.calls) {
+      expect(call[2]).toBe("hourly")
+    }
+  })
+
   it("shows the preview state when billing dashboard access is disabled", () => {
     useBillingUsage.mockReturnValue({
       data: {
@@ -271,30 +304,48 @@ describe("PlanUsagePage", () => {
 
     renderPage()
 
-    expect(screen.getByText("Free During Preview")).toBeInTheDocument()
+    expect(screen.queryByText("Free During Preview")).not.toBeInTheDocument()
     expect(screen.queryByText("Pay-as-you-go • USD")).toBeInTheDocument()
     expect(useBillingUsage).toHaveBeenCalledWith(
       new Date("2026-06-01T00:00:00.000Z"),
       new Date("2026-07-01T00:00:00.000Z"),
+      "daily",
+      expect.any(String),
       true,
     )
   })
 
   it("shows a not-charged indicator for shadow usage", () => {
+    const summaryQuery = useBillingSummary.mock.results[0]?.value
+    useBillingSummary.mockReturnValue({
+      ...summaryQuery,
+      data: { ...summaryQuery.data, billing_mode: "shadow" },
+    })
     useBillingUsage.mockReturnValue({
       data: {
         enabled: true,
-        billing_mode: "shadow",
-        period_start: "2026-06-01T00:00:00.000Z",
-        period_end: "2026-06-02T00:00:00.000Z",
-        rows: [
+        start: "2026-06-01T00:00:00.000Z",
+        end: "2026-07-01T00:00:00.000Z",
+        granularity: "day",
+        timezone: "UTC",
+        buckets: [
           {
-            hour_start: "2026-06-01T00:00:00.000Z",
-            hour_end: "2026-06-01T01:00:00.000Z",
-            vcpu_seconds: 120,
-            memory_mib_seconds: 2048,
-            storage_mib_seconds: 4096,
-            updated_at: "2026-06-01T01:05:00.000Z",
+            start: "2026-06-01T00:00:00.000Z",
+            end: "2026-06-02T00:00:00.000Z",
+            cpu: { usage: 120, cost_usd: 60, tracked: true, billable: true },
+            memory: {
+              usage: 2048,
+              cost_usd: 40,
+              tracked: true,
+              billable: true,
+            },
+            storage: {
+              usage: 4096,
+              cost_usd: 0,
+              tracked: true,
+              billable: false,
+            },
+            billed_total_usd: 100,
           },
         ],
       },
@@ -308,8 +359,7 @@ describe("PlanUsagePage", () => {
     expect(
       screen.getByText("Your team is not being charged for this usage yet."),
     ).toBeInTheDocument()
-    expect(screen.getByTestId("compute-section")).toBeInTheDocument()
-    expect(screen.getByTestId("storage-section")).toBeInTheDocument()
+    expect(screen.getByTestId("usage-cost-chart")).toBeInTheDocument()
     expect(
       screen.queryByTestId("sandbox-state-section"),
     ).not.toBeInTheDocument()
@@ -326,6 +376,184 @@ describe("PlanUsagePage", () => {
     ).toBeInTheDocument()
     expect(screen.getByText("Running")).toBeInTheDocument()
     expect(screen.getByText("Paused")).toBeInTheDocument()
+  })
+
+  it.each([
+    {
+      name: "billed maximum",
+      cpu: 0.006,
+      memory: 0.004,
+      storage: 0.005,
+      heights: [60, 40, 50],
+    },
+    {
+      name: "storage maximum",
+      cpu: 0.002,
+      memory: 0.003,
+      storage: 0.01,
+      heights: [20, 30, 100],
+    },
+    {
+      name: "zero costs with nonzero usage",
+      cpu: 0,
+      memory: 0,
+      storage: 0,
+      heights: [0, 0, 0],
+    },
+  ])(
+    "scales bars to the dataset's $name",
+    ({ cpu, memory, storage, heights }) => {
+      useBillingUsage.mockReturnValue({
+        data: {
+          start: "2026-06-01T00:00:00.000Z",
+          end: "2026-06-01T02:00:00.000Z",
+          granularity: "hour",
+          timezone: "UTC",
+          buckets: [1, 0.5].map((factor, index) => ({
+            start: `2026-06-01T0${index}:00:00.000Z`,
+            end: `2026-06-01T0${index + 1}:00:00.000Z`,
+            cpu: {
+              usage: 1,
+              cost_usd: cpu * factor,
+              tracked: true,
+              billable: true,
+            },
+            memory: {
+              usage: 1,
+              cost_usd: memory * factor,
+              tracked: true,
+              billable: true,
+            },
+            storage: {
+              usage: 1,
+              cost_usd: storage * factor,
+              tracked: true,
+              billable: false,
+            },
+            billed_total_usd: (cpu + memory) * factor,
+          })),
+        },
+        isPending: false,
+        error: null,
+        refetch: vi.fn(),
+      })
+
+      renderPage()
+
+      const stacks = screen.getAllByTestId("billed-cost-stack")
+      const storageBars = screen.getAllByTestId("storage-equivalent-bar")
+      expect(stacks).toHaveLength(2)
+      for (const [index, factor] of [1, 0.5].entries()) {
+        const stack = within(stacks[index])
+        expect(stack.getByLabelText(/^CPU /)).toHaveStyle({
+          height: `${heights[0] * factor}%`,
+        })
+        expect(stack.getByLabelText(/^Memory /)).toHaveStyle({
+          height: `${heights[1] * factor}%`,
+        })
+        expect(storageBars[index]).toHaveStyle({
+          height: `${heights[2] * factor}%`,
+        })
+      }
+    },
+  )
+
+  it("shows the no-usage state when every bucket resource is zero", () => {
+    useBillingUsage.mockReturnValue({
+      data: {
+        start: "2026-06-01T00:00:00.000Z",
+        end: "2026-07-01T00:00:00.000Z",
+        granularity: "day",
+        timezone: "UTC",
+        buckets: [
+          {
+            start: "2026-06-01T00:00:00.000Z",
+            end: "2026-06-02T00:00:00.000Z",
+            cpu: { usage: 0, cost_usd: 0, tracked: true, billable: true },
+            memory: { usage: 0, cost_usd: 0, tracked: true, billable: true },
+            storage: { usage: 0, cost_usd: 0, tracked: true, billable: false },
+            billed_total_usd: 0,
+          },
+        ],
+      },
+      isPending: false,
+      error: null,
+      refetch: vi.fn(),
+    })
+
+    renderPage()
+
+    expect(screen.getByText("No Usage For This Period")).toBeInTheDocument()
+    expect(screen.queryByTestId("usage-cost-chart")).not.toBeInTheDocument()
+  })
+
+  it("uses backend bucket boundaries for monthly labels and tooltip ranges", () => {
+    useCustomerBillingPeriods.mockReturnValue({
+      data: {
+        periods: [
+          {
+            period_id: "2025-11-15T12:00:00.000Z,2026-02-15T12:00:00.000Z",
+            period_start: "2025-11-15T12:00:00.000Z",
+            period_end: "2026-02-15T12:00:00.000Z",
+            status: "active",
+            stripe_customer_id: "cus_test",
+            stripe_subscription_status: "active",
+            finalized_at: "2026-02-01T00:00:00.000Z",
+            exported_at: "2026-02-01T00:05:00.000Z",
+          },
+        ],
+      },
+      isPending: false,
+      error: null,
+      refetch: vi.fn(),
+    })
+    useBillingUsage.mockReturnValue({
+      data: {
+        start: "2025-11-15T12:00:00.000Z",
+        end: "2026-02-15T12:00:00.000Z",
+        granularity: "month",
+        timezone: "UTC",
+        buckets: [
+          {
+            start: "2025-12-15T00:00:00.000Z",
+            end: "2026-01-01T00:00:00.000Z",
+            cpu: { usage: 1, cost_usd: 1, tracked: true, billable: true },
+            memory: { usage: 1, cost_usd: 2, tracked: true, billable: true },
+            storage: { usage: 1, cost_usd: 3, tracked: true, billable: false },
+            billed_total_usd: 3,
+          },
+          {
+            start: "2026-01-01T00:00:00.000Z",
+            end: "2026-02-15T12:00:00.000Z",
+            cpu: { usage: 1, cost_usd: 4, tracked: true, billable: true },
+            memory: { usage: 1, cost_usd: 5, tracked: true, billable: true },
+            storage: { usage: 1, cost_usd: 6, tracked: true, billable: false },
+            billed_total_usd: 9,
+          },
+        ],
+      },
+      isPending: false,
+      error: null,
+      refetch: vi.fn(),
+    })
+
+    renderPage()
+
+    const chart = screen.getByTestId("usage-cost-chart")
+    expect(chart).toHaveTextContent("Dec 2025")
+    expect(chart).toHaveTextContent("Jan 2026")
+    expect(
+      within(chart).getAllByLabelText(/CPU \$1\.00/).length,
+    ).toBeGreaterThan(0)
+    expect(
+      within(chart).getAllByLabelText(/CPU \$4\.00/).length,
+    ).toBeGreaterThan(0)
+    expect(bucketLabel("2025-12-15T00:00:00.000Z", "monthly", true)).toMatch(
+      /Dec 2025/,
+    )
+    expect(bucketLabel("2026-01-01T00:00:00.000Z", "monthly", true)).toMatch(
+      /Jan 2026/,
+    )
   })
 
   it("does not show the not-charged indicator for active usage", () => {
@@ -359,23 +587,16 @@ describe("PlanUsagePage", () => {
     expect(screen.getByText("Usage Details")).toBeInTheDocument()
     expect(screen.queryByText(/Last updated:/i)).not.toBeInTheDocument()
     expect(screen.getByText("Pay-as-you-go • USD")).toBeInTheDocument()
-    expect(screen.getByTestId("usage-cards-grid")).toHaveClass("xl:grid-cols-3")
-    const sandboxesCard = screen.getByTestId("sandboxes-card")
-    const computeSection = screen.getByTestId("compute-section")
-    const storageSection = screen.getByTestId("storage-section")
-    expect(sandboxesCard).toBeInTheDocument()
-    expect(computeSection).toBeInTheDocument()
-    expect(storageSection).toBeInTheDocument()
+    expect(screen.queryByTestId("usage-cards-grid")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("sandboxes-card")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("compute-section")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("storage-section")).not.toBeInTheDocument()
     expect(
       screen.queryByTestId("sandbox-state-section"),
     ).not.toBeInTheDocument()
-    expect(within(sandboxesCard).getByText("Running")).toBeInTheDocument()
-    expect(within(sandboxesCard).getByText("Paused")).toBeInTheDocument()
-    expect(within(computeSection).getByText("This period")).toBeInTheDocument()
     expect(screen.queryByText("CPU Usage")).not.toBeInTheDocument()
     expect(screen.queryByText("Memory Usage")).not.toBeInTheDocument()
     expect(screen.queryByText("Storage Context")).not.toBeInTheDocument()
-    expect(within(storageSection).getByText("Storage")).toBeInTheDocument()
   })
 
   it("keeps usage visible when billing summary access is denied", () => {
@@ -440,5 +661,34 @@ describe("PlanUsagePage", () => {
       "impersonated-team",
       "use:impersonated-team",
     )
+  })
+})
+
+describe("hourly bucket labels", () => {
+  it("distinguishes the same hour on consecutive days", () => {
+    expect(bucketLabel("2026-06-01T05:00:00Z", "hourly", false, "UTC")).toMatch(
+      /Jun 1.*5 AM/,
+    )
+    expect(bucketLabel("2026-06-02T05:00:00Z", "hourly", false, "UTC")).toMatch(
+      /Jun 2.*5 AM/,
+    )
+  })
+
+  it("uses the series timezone for both the date and hour", () => {
+    expect(
+      bucketLabel("2026-06-01T00:00:00Z", "hourly", false, "America/Chicago"),
+    ).toMatch(/May 31.*7 PM/)
+  })
+})
+
+describe("usage cost precision", () => {
+  it.each([
+    [0, "0.00"],
+    [1.23, "1.23"],
+    [0.01, "0.01"],
+    [0.004, "0.004"],
+    [0.00001234, "0.000012"],
+  ])("formats %s without hiding small positive costs", (value, expected) => {
+    expect(formatUsageCost(value)).toBe(expected)
   })
 })
