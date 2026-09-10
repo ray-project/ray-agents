@@ -57,7 +57,7 @@ interface RequestOptions {
  * Compose an internal controller signal with an optional user signal.
  * Uses AbortSignal.any when available.
  */
-function composeSignals(
+export function composeSignals(
   internal: AbortSignal,
   user?: AbortSignal,
 ): AbortSignal {
@@ -65,8 +65,23 @@ function composeSignals(
   return AbortSignal.any([internal, user])
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+/** Sleep that ends early, rejecting with an AbortError, if signal aborts. */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("aborted", "AbortError"))
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new DOMException("aborted", "AbortError"))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
 }
 
 /**
@@ -173,7 +188,7 @@ async function retryableFetch(
           // ignore
         }
         clearTimeout(timer)
-        await sleep(delay)
+        await sleep(delay, opts.userSignal)
         continue
       }
 
@@ -198,7 +213,7 @@ async function retryableFetch(
 
       // Retry network errors if retryable and attempts remain
       if (opts.retryable && isNetworkError(err) && attempt < maxAttempts) {
-        await sleep(backoffDelay(attempt))
+        await sleep(backoffDelay(attempt), opts.userSignal)
         continue
       }
 

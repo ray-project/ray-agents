@@ -12,6 +12,7 @@ import respx
 from superserve import Sandbox, SandboxError, SandboxStatus, ValidationError
 from superserve.errors import SandboxTimeoutError
 import superserve.sandbox as sync_module
+import superserve._http as http_module
 
 API = "https://api.example.com"
 
@@ -872,5 +873,39 @@ def test_pause_deadline_stops_before_a_poll_it_cannot_afford(monkeypatch):
             with pytest.raises(SandboxTimeoutError):
                 sbx.pause(timeout=1.0, poll_interval_s=2.0)
             assert get.call_count == 0
+        finally:
+            sbx._close_http_client()
+
+
+def test_pause_deadline_covers_a_retry_after_wait(monkeypatch):
+    clock = [0.0]
+    fake = SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda n: clock.__setitem__(0, clock[0] + n)
+    )
+    with respx.mock() as router:
+        router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+            return_value=httpx.Response(200, json=_raw())
+        )
+        router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+            return_value=httpx.Response(202, json={"status": "pausing"})
+        )
+        get = router.get(f"{API}/sandboxes/sbx-1").mock(
+            side_effect=[
+                httpx.Response(
+                    429,
+                    json={"error": {"message": "retry later"}},
+                    headers={"Retry-After": "2"},
+                ),
+                httpx.Response(200, json=_raw(status="paused")),
+            ]
+        )
+        sbx = Sandbox.connect("sbx-1")
+        monkeypatch.setattr(sync_module, "time", fake)
+        monkeypatch.setattr(http_module, "time", fake)
+        try:
+            with pytest.raises(SandboxTimeoutError):
+                sbx.pause(timeout=1.0, poll_interval_s=0.01)
+            assert clock[0] <= 1.0
+            assert get.call_count == 1
         finally:
             sbx._close_http_client()

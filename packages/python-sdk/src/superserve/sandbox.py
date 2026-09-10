@@ -11,7 +11,7 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from ._config import ResolvedConfig, preview_url, resolve_config
-from ._http import DEFAULT_PAUSE_TIMEOUT, DEFAULT_TIMEOUT, api_request
+from ._http import DEFAULT_PAUSE_TIMEOUT, DeadlineExceeded, api_request
 from .commands import Commands, CommandsDeps
 from .errors import NotFoundError, SandboxError, SandboxTimeoutError
 from .files import Files, FilesDeps
@@ -418,36 +418,40 @@ class Sandbox:
         self._require_not_deleted()
         deadline = time.monotonic() + timeout
         headers = {"X-API-Key": self._config.api_key}
-        raw = api_request(
-            "POST",
-            f"{self._config.base_url}/sandboxes/{self.id}/pause",
-            headers={**headers, "Prefer": "respond-async"},
-            timeout=min(DEFAULT_TIMEOUT, timeout),
-            client=self._http_client,
+        still_pausing = SandboxTimeoutError(
+            f"Sandbox {self.id} is still pausing after {timeout}s; "
+            "it will finish in the background"
         )
+        try:
+            raw = api_request(
+                "POST",
+                f"{self._config.base_url}/sandboxes/{self.id}/pause",
+                headers={**headers, "Prefer": "respond-async"},
+                budget=timeout,
+                client=self._http_client,
+            )
+        except DeadlineExceeded as exc:
+            raise still_pausing from exc
         if not (isinstance(raw, dict) and raw.get("status") == "pausing"):
             return
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise SandboxTimeoutError(
-                    f"Sandbox {self.id} is still pausing after {timeout}s; "
-                    "it will finish in the background"
-                )
+                raise still_pausing
             time.sleep(min(poll_interval_s, remaining))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise SandboxTimeoutError(
-                    f"Sandbox {self.id} is still pausing after {timeout}s; "
-                    "it will finish in the background"
+            try:
+                raw = api_request(
+                    "GET",
+                    f"{self._config.base_url}/sandboxes/{self.id}",
+                    headers=headers,
+                    budget=deadline - time.monotonic(),
+                    client=self._http_client,
                 )
-            raw = api_request(
-                "GET",
-                f"{self._config.base_url}/sandboxes/{self.id}",
-                headers=headers,
-                timeout=min(DEFAULT_TIMEOUT, remaining),
-                client=self._http_client,
-            )
+            except DeadlineExceeded as exc:
+                raise still_pausing from exc
+            except SandboxTimeoutError:
+                # One slow poll; the deadline decides whether to keep going.
+                continue
             status = to_sandbox_info(raw).status
             if status == SandboxStatus.PAUSED:
                 return

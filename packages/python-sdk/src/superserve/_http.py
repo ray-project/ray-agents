@@ -146,6 +146,33 @@ async def _aread_capped(achunks: AsyncIterable[bytes], max_bytes: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+class DeadlineExceeded(SandboxTimeoutError):
+    """The operation deadline passed while a request, retry wait, or response
+    was still in progress."""
+
+
+def _attempt_timeout(timeout: float, deadline: float | None) -> float:
+    """Per-attempt timeout that also stops at the operation deadline."""
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise DeadlineExceeded("Operation deadline exceeded")
+    return min(timeout, remaining)
+
+
+def _retry_delay(delay: float, deadline: float | None) -> float:
+    """A retry wait that would end past the deadline is not worth starting."""
+    if deadline is not None and time.monotonic() + delay >= deadline:
+        raise DeadlineExceeded("Operation deadline exceeded")
+    return delay
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise DeadlineExceeded("Operation deadline exceeded")
+
+
 def _do_request_with_retry(
     method: str,
     url: str,
@@ -153,14 +180,19 @@ def _do_request_with_retry(
     headers: dict[str, str],
     json_body: Any | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    budget: float | None = None,
     client: httpx.Client | None = None,
 ) -> httpx.Response:
     """Perform an HTTP request with retry for idempotent methods.
+
+    ``budget`` (seconds) bounds the whole call: every attempt, every retry
+    wait, and the response itself.
 
     Retries on 429/502/503/504 and on transient connection errors
     (``httpx.ConnectError``, ``httpx.ReadError``, ``httpx.RemoteProtocolError``).
     Never retries non-idempotent methods.
     """
+    deadline = None if budget is None else time.monotonic() + budget
     owned = client is None
     if owned:
         client = httpx.Client(timeout=timeout)
@@ -171,17 +203,19 @@ def _do_request_with_retry(
 
     try:
         for attempt in range(_MAX_ATTEMPTS):
+            attempt_timeout = _attempt_timeout(timeout, deadline)
             try:
                 response = client.request(
                     method_upper,
                     url,
                     headers=headers,
                     json=json_body,
-                    timeout=timeout,
+                    timeout=attempt_timeout,
                 )
             except httpx.TimeoutException as exc:
+                _check_deadline(deadline)
                 raise SandboxTimeoutError(
-                    f"Request timed out after {timeout}s"
+                    f"Request timed out after {attempt_timeout}s"
                 ) from exc
             except _RETRY_CONNECTION_EXCEPTIONS as exc:
                 last_exc = exc
@@ -190,7 +224,7 @@ def _do_request_with_retry(
                     or attempt == _MAX_ATTEMPTS - 1
                 ):
                     raise SandboxError(f"Network error: {exc}") from exc
-                time.sleep(_compute_backoff(attempt))
+                time.sleep(_retry_delay(_compute_backoff(attempt), deadline))
                 continue
             except httpx.HTTPError as exc:
                 raise SandboxError(f"Network error: {exc}") from exc
@@ -212,10 +246,12 @@ def _do_request_with_retry(
                 else:
                     delay = _compute_backoff(attempt)
                 response.close()
+                delay = _retry_delay(delay, deadline)
                 if delay > 0:
                     time.sleep(delay)
                 continue
 
+            _check_deadline(deadline)
             return response
 
         # Should not reach here unless all attempts failed to a connection error
@@ -234,6 +270,7 @@ def api_request(
     headers: dict[str, str],
     json_body: Any | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    budget: float | None = None,
     client: httpx.Client | None = None,
 ) -> Any:
     """Make a JSON API request. Returns parsed response body or None for 204."""
@@ -244,6 +281,7 @@ def api_request(
         headers=merged,
         json_body=json_body,
         timeout=timeout,
+        budget=budget,
         client=client,
     )
 
@@ -429,9 +467,11 @@ async def _async_do_request_with_retry(
     headers: dict[str, str],
     json_body: Any | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    budget: float | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> httpx.Response:
     """Async variant of ``_do_request_with_retry``."""
+    deadline = None if budget is None else time.monotonic() + budget
     owned = client is None
     if owned:
         client = httpx.AsyncClient(timeout=timeout)
@@ -442,17 +482,19 @@ async def _async_do_request_with_retry(
 
     try:
         for attempt in range(_MAX_ATTEMPTS):
+            attempt_timeout = _attempt_timeout(timeout, deadline)
             try:
                 response = await client.request(
                     method_upper,
                     url,
                     headers=headers,
                     json=json_body,
-                    timeout=timeout,
+                    timeout=attempt_timeout,
                 )
             except httpx.TimeoutException as exc:
+                _check_deadline(deadline)
                 raise SandboxTimeoutError(
-                    f"Request timed out after {timeout}s"
+                    f"Request timed out after {attempt_timeout}s"
                 ) from exc
             except _RETRY_CONNECTION_EXCEPTIONS as exc:
                 last_exc = exc
@@ -461,7 +503,7 @@ async def _async_do_request_with_retry(
                     or attempt == _MAX_ATTEMPTS - 1
                 ):
                     raise SandboxError(f"Network error: {exc}") from exc
-                await asyncio.sleep(_compute_backoff(attempt))
+                await asyncio.sleep(_retry_delay(_compute_backoff(attempt), deadline))
                 continue
             except httpx.HTTPError as exc:
                 raise SandboxError(f"Network error: {exc}") from exc
@@ -483,10 +525,12 @@ async def _async_do_request_with_retry(
                 else:
                     delay = _compute_backoff(attempt)
                 await response.aclose()
+                delay = _retry_delay(delay, deadline)
                 if delay > 0:
                     await asyncio.sleep(delay)
                 continue
 
+            _check_deadline(deadline)
             return response
 
         if last_exc is not None:
@@ -504,6 +548,7 @@ async def async_api_request(
     headers: dict[str, str],
     json_body: Any | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    budget: float | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> Any:
     """Async variant of api_request."""
@@ -514,6 +559,7 @@ async def async_api_request(
         headers=merged,
         json_body=json_body,
         timeout=timeout,
+        budget=budget,
         client=client,
     )
 

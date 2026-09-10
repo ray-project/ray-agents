@@ -12,6 +12,7 @@ import respx
 from superserve import AsyncSandbox, SandboxError, SandboxStatus, ValidationError
 from superserve.errors import SandboxTimeoutError
 import superserve.async_sandbox as async_module
+import superserve._http as http_module
 
 API = "https://api.example.com"
 
@@ -661,5 +662,46 @@ async def test_pause_deadline_stops_before_a_poll_it_cannot_afford(monkeypatch):
             with pytest.raises(SandboxTimeoutError):
                 await sbx.pause(timeout=1.0, poll_interval_s=2.0)
             assert get.call_count == 0
+        finally:
+            await sbx._close_http_client()
+
+
+async def test_pause_deadline_covers_a_retry_after_wait(monkeypatch):
+    clock = [0.0]
+
+    async def sleep(n):
+        clock[0] += n
+
+    with respx.mock() as router:
+        router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+            return_value=httpx.Response(200, json=_raw())
+        )
+        router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+            return_value=httpx.Response(202, json={"status": "pausing"})
+        )
+        get = router.get(f"{API}/sandboxes/sbx-1").mock(
+            side_effect=[
+                httpx.Response(
+                    429,
+                    json={"error": {"message": "retry later"}},
+                    headers={"Retry-After": "2"},
+                ),
+                httpx.Response(200, json=_raw(status="paused")),
+            ]
+        )
+        sbx = await AsyncSandbox.connect("sbx-1")
+        monkeypatch.setattr(
+            async_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
+        )
+        monkeypatch.setattr(async_module, "asyncio", SimpleNamespace(sleep=sleep))
+        monkeypatch.setattr(
+            http_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
+        )
+        monkeypatch.setattr(http_module, "asyncio", SimpleNamespace(sleep=sleep))
+        try:
+            with pytest.raises(SandboxTimeoutError):
+                await sbx.pause(timeout=1.0, poll_interval_s=0.01)
+            assert clock[0] <= 1.0
+            assert get.call_count == 1
         finally:
             await sbx._close_http_client()
