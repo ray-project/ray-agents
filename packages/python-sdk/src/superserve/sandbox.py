@@ -11,7 +11,7 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from ._config import ResolvedConfig, preview_url, resolve_config
-from ._http import DEFAULT_TIMEOUT, api_request
+from ._http import DEFAULT_PAUSE_TIMEOUT, DEFAULT_TIMEOUT, api_request
 from .commands import Commands, CommandsDeps
 from .errors import NotFoundError, SandboxError, SandboxTimeoutError
 from .files import Files, FilesDeps
@@ -406,33 +406,49 @@ class Sandbox:
         return PreviewToken(**raw)
 
     def pause(
-        self, *, timeout: float = DEFAULT_TIMEOUT, poll_interval_s: float = 1.0
+        self, *, timeout: float = DEFAULT_PAUSE_TIMEOUT, poll_interval_s: float = 1.0
     ) -> None:
         """Pause this sandbox and return once it is ``paused``.
 
-        ``timeout`` bounds the whole wait. If the host has not finished by
+        ``timeout`` bounds the whole wait (five minutes by default: a pause
+        can take a while on a busy host). If the host has not finished by
         then, :class:`SandboxTimeoutError` is raised but the pause itself
         carries on; ``get_info()`` reports ``paused`` once it lands.
         """
         self._require_not_deleted()
         deadline = time.monotonic() + timeout
+        headers = {"X-API-Key": self._config.api_key}
         raw = api_request(
             "POST",
             f"{self._config.base_url}/sandboxes/{self.id}/pause",
-            headers={"X-API-Key": self._config.api_key, "Prefer": "respond-async"},
-            timeout=timeout,
+            headers={**headers, "Prefer": "respond-async"},
+            timeout=min(DEFAULT_TIMEOUT, timeout),
             client=self._http_client,
         )
         if not (isinstance(raw, dict) and raw.get("status") == "pausing"):
             return
         while True:
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise SandboxTimeoutError(
                     f"Sandbox {self.id} is still pausing after {timeout}s; "
                     "it will finish in the background"
                 )
-            time.sleep(poll_interval_s)
-            status = self.get_info().status
+            time.sleep(min(poll_interval_s, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SandboxTimeoutError(
+                    f"Sandbox {self.id} is still pausing after {timeout}s; "
+                    "it will finish in the background"
+                )
+            raw = api_request(
+                "GET",
+                f"{self._config.base_url}/sandboxes/{self.id}",
+                headers=headers,
+                timeout=min(DEFAULT_TIMEOUT, remaining),
+                client=self._http_client,
+            )
+            status = to_sandbox_info(raw).status
             if status == SandboxStatus.PAUSED:
                 return
             if status != SandboxStatus.PAUSING:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import json
 
 import httpx
@@ -9,6 +11,7 @@ import pytest
 import respx
 from superserve import Sandbox, SandboxError, SandboxStatus, ValidationError
 from superserve.errors import SandboxTimeoutError
+import superserve.sandbox as sync_module
 
 API = "https://api.example.com"
 
@@ -812,3 +815,62 @@ class TestConcurrentRefresh:
                 assert exec_call_count == 4  # 2 initial 401s + 2 retries
             finally:
                 sbx._close_http_client()
+
+
+# Clock-controlled: the wall clock the pause loop reads is replaced so a
+# two-minute pause plays out instantly.
+def _clock_routes(router, clock, *, slow):
+    router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+        return_value=httpx.Response(200, json=_raw())
+    )
+
+    def post(request):
+        if slow:
+            clock[0] += 20.0  # the API holds the request before answering 202
+        return httpx.Response(202, json={"status": "pausing"})
+
+    router.post(f"{API}/sandboxes/sbx-1/pause").mock(side_effect=post)
+    return router.get(f"{API}/sandboxes/sbx-1").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json=_raw(status="paused" if not slow or clock[0] >= 120 else "pausing"),
+        )
+    )
+
+
+def _fake_clock(monkeypatch, clock):
+    monkeypatch.setattr(
+        sync_module,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: clock[0],
+            sleep=lambda n: clock.__setitem__(0, clock[0] + n),
+        ),
+    )
+
+
+def test_pause_default_budget_covers_a_two_minute_pause(monkeypatch):
+    clock = [0.0]
+    with respx.mock() as router:
+        _clock_routes(router, clock, slow=True)
+        sbx = Sandbox.connect("sbx-1")
+        _fake_clock(monkeypatch, clock)
+        try:
+            sbx.pause()
+            assert clock[0] >= 120
+        finally:
+            sbx._close_http_client()
+
+
+def test_pause_deadline_stops_before_a_poll_it_cannot_afford(monkeypatch):
+    clock = [0.0]
+    with respx.mock(assert_all_called=False) as router:
+        get = _clock_routes(router, clock, slow=False)
+        sbx = Sandbox.connect("sbx-1")
+        _fake_clock(monkeypatch, clock)
+        try:
+            with pytest.raises(SandboxTimeoutError):
+                sbx.pause(timeout=1.0, poll_interval_s=2.0)
+            assert get.call_count == 0
+        finally:
+            sbx._close_http_client()

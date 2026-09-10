@@ -40,6 +40,27 @@ import type {
 } from "./types.js"
 import { toNetworkLogPage, toSandboxInfo } from "./types.js"
 
+/** How long `pause()` waits for the host across every request it makes. */
+const DEFAULT_PAUSE_TIMEOUT_MS = 300_000
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new SandboxError("Request aborted"))
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new SandboxError("Request aborted"))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
 export class Sandbox {
   /** Unique sandbox ID (UUID). */
   readonly id: string
@@ -342,9 +363,10 @@ export class Sandbox {
    * Pause this sandbox and return once it is `paused`. All running processes
    * and file state are preserved.
    *
-   * `timeoutMs` bounds the whole wait (default 30s). If the host has not
-   * finished by then a `TimeoutError` is thrown but the pause itself carries
-   * on; `getInfo()` reports `paused` once it lands.
+   * `timeoutMs` bounds the whole wait (five minutes by default: a pause can
+   * take a while on a busy host). If the host has not finished by then a
+   * `TimeoutError` is thrown but the pause itself carries on; `getInfo()`
+   * reports `paused` once it lands. `signal` stops waiting at any point.
    */
   async pause(
     options: {
@@ -353,26 +375,45 @@ export class Sandbox {
       signal?: AbortSignal
     } = {},
   ): Promise<void> {
-    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    const timeoutMs = options.timeoutMs ?? DEFAULT_PAUSE_TIMEOUT_MS
     const pollMs = options.pollIntervalMs ?? 1000
     const deadline = Date.now() + timeoutMs
+    const stillPausing = () =>
+      new TimeoutError(
+        `Sandbox ${this.id} is still pausing after ${timeoutMs}ms; it will finish in the background`,
+      )
     const raw = await request<{ status?: string } | undefined>({
       method: "POST",
       url: `${this._config.baseUrl}/sandboxes/${this.id}/pause`,
       headers: { "X-API-Key": this._config.apiKey, Prefer: "respond-async" },
-      timeoutMs,
+      timeoutMs: Math.min(DEFAULT_TIMEOUT_MS, timeoutMs),
       signal: options.signal,
     })
     if (raw?.status !== "pausing") return
     while (true) {
-      if (options.signal?.aborted) throw new SandboxError("aborted")
-      if (Date.now() >= deadline) {
-        throw new TimeoutError(
-          `Sandbox ${this.id} is still pausing after ${timeoutMs}ms; it will finish in the background`,
-        )
+      let left = deadline - Date.now()
+      if (left <= 0) throw stillPausing()
+      await abortableSleep(Math.min(pollMs, left), options.signal)
+      left = deadline - Date.now()
+      if (left <= 0) throw stillPausing()
+      let status: SandboxInfo["status"]
+      try {
+        const info = await request<ApiSandboxResponse>({
+          method: "GET",
+          url: `${this._config.baseUrl}/sandboxes/${this.id}`,
+          headers: { "X-API-Key": this._config.apiKey },
+          timeoutMs: Math.min(DEFAULT_TIMEOUT_MS, left),
+          signal: options.signal,
+        })
+        status = toSandboxInfo(info).status
+      } catch (err) {
+        // A poll cut off by the operation deadline is the deadline, not a
+        // failed request.
+        if (err instanceof TimeoutError && deadline - Date.now() <= 0) {
+          throw stillPausing()
+        }
+        throw err
       }
-      await new Promise((r) => setTimeout(r, pollMs))
-      const { status } = await this.getInfo()
       if (status === "paused") return
       if (status !== "pausing") {
         throw new SandboxError(

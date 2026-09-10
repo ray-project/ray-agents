@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { TimeoutError, ValidationError } from "../src/errors.js"
+import { SandboxError, TimeoutError, ValidationError } from "../src/errors.js"
 import { Sandbox } from "../src/Sandbox.js"
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -412,6 +412,130 @@ describe("Sandbox instance methods", () => {
     await expect(
       sandbox.pause({ timeoutMs: 30, pollIntervalMs: 1 }),
     ).rejects.toBeInstanceOf(TimeoutError)
+  })
+
+  it("sandbox.pause waits out a two-minute pause under the default budget", async () => {
+    const sandbox = await makeSandbox()
+    vi.useFakeTimers()
+    try {
+      const start = Date.now()
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          if (init.method === "POST") {
+            await new Promise((r) => setTimeout(r, 20_000))
+            return jsonResponse({ status: "pausing" }, 202)
+          }
+          return jsonResponse({
+            ...baseSandbox,
+            status: Date.now() - start >= 120_000 ? "paused" : "pausing",
+          })
+        }),
+      )
+      let outcome: unknown = "pending"
+      const pending = sandbox.pause().then(
+        () => {
+          outcome = "paused"
+        },
+        (e: unknown) => {
+          outcome = e
+        },
+      )
+      await vi.advanceTimersByTimeAsync(120_000)
+      await pending
+      expect(outcome).toBe("paused")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("sandbox.pause deadline cuts off a poll still in flight", async () => {
+    const sandbox = await makeSandbox()
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          if (init.method === "POST")
+            return jsonResponse({ status: "pausing" }, 202)
+          await new Promise<void>((resolve, reject) => {
+            setTimeout(resolve, 80)
+            init.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("aborted", "AbortError")),
+              { once: true },
+            )
+          })
+          return jsonResponse({ ...baseSandbox, status: "paused" })
+        }),
+      )
+      let outcome: unknown = "pending"
+      const pending = sandbox.pause({ timeoutMs: 40, pollIntervalMs: 10 }).then(
+        () => {
+          outcome = "paused"
+        },
+        (e: unknown) => {
+          outcome = e
+        },
+      )
+      await vi.advanceTimersByTimeAsync(41)
+      const atDeadline = outcome
+      await vi.advanceTimersByTimeAsync(100)
+      await pending
+      expect(atDeadline).toBeInstanceOf(TimeoutError)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("sandbox.pause abort stops a poll without waiting for its answer", async () => {
+    const sandbox = await makeSandbox()
+    vi.useFakeTimers()
+    try {
+      let finishGet: (() => void) | undefined
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          if (init.method === "POST")
+            return jsonResponse({ status: "pausing" }, 202)
+          return new Promise<Response>((resolve, reject) => {
+            finishGet = () =>
+              resolve(jsonResponse({ ...baseSandbox, status: "paused" }))
+            init.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("aborted", "AbortError")),
+              { once: true },
+            )
+          })
+        }),
+      )
+      const controller = new AbortController()
+      let outcome: unknown = "pending"
+      const pending = sandbox
+        .pause({
+          timeoutMs: 120_000,
+          pollIntervalMs: 10,
+          signal: controller.signal,
+        })
+        .then(
+          () => {
+            outcome = "paused"
+          },
+          (e: unknown) => {
+            outcome = e
+          },
+        )
+      await vi.advanceTimersByTimeAsync(10)
+      expect(finishGet).toBeDefined()
+      controller.abort()
+      await vi.advanceTimersByTimeAsync(0)
+      const afterAbort = outcome
+      finishGet?.()
+      await pending
+      expect(afterAbort).toBeInstanceOf(SandboxError)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("sandbox.attachSecret POSTs /secrets with env_key and secret_name", async () => {
