@@ -62,7 +62,23 @@ export function composeSignals(
   user?: AbortSignal,
 ): AbortSignal {
   if (!user) return internal
-  return AbortSignal.any([internal, user])
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any([internal, user])
+  }
+  // Older runtimes (Node before 18.17): forward whichever aborts first.
+  const controller = new AbortController()
+  const forward = (source: AbortSignal) => {
+    if (source.aborted) {
+      controller.abort(source.reason)
+      return
+    }
+    source.addEventListener("abort", () => controller.abort(source.reason), {
+      once: true,
+    })
+  }
+  forward(internal)
+  forward(user)
+  return controller.signal
 }
 
 /** Sleep that ends early, rejecting with an AbortError, if signal aborts. */
