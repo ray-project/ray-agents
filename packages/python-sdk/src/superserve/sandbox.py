@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import builtins
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 
 import httpx
 
 from ._config import ResolvedConfig, preview_url, resolve_config
-from ._http import api_request
+from ._http import DEFAULT_TIMEOUT, api_request
 from .commands import Commands, CommandsDeps
-from .errors import NotFoundError, SandboxError
+from .errors import NotFoundError, SandboxError, SandboxTimeoutError
 from .files import Files, FilesDeps
 from .types import (
     UNSET,
@@ -404,15 +405,41 @@ class Sandbox:
         )
         return PreviewToken(**raw)
 
-    def pause(self) -> None:
-        """Pause this sandbox. The sandbox transitions to ``paused``."""
+    def pause(
+        self, *, timeout: float = DEFAULT_TIMEOUT, poll_interval_s: float = 1.0
+    ) -> None:
+        """Pause this sandbox and return once it is ``paused``.
+
+        ``timeout`` bounds the whole wait. If the host has not finished by
+        then, :class:`SandboxTimeoutError` is raised but the pause itself
+        carries on; ``get_info()`` reports ``paused`` once it lands.
+        """
         self._require_not_deleted()
-        api_request(
+        deadline = time.monotonic() + timeout
+        raw = api_request(
             "POST",
             f"{self._config.base_url}/sandboxes/{self.id}/pause",
-            headers={"X-API-Key": self._config.api_key},
+            headers={"X-API-Key": self._config.api_key, "Prefer": "respond-async"},
+            timeout=timeout,
             client=self._http_client,
         )
+        if not (isinstance(raw, dict) and raw.get("status") == "pausing"):
+            return
+        while True:
+            if time.monotonic() >= deadline:
+                raise SandboxTimeoutError(
+                    f"Sandbox {self.id} is still pausing after {timeout}s; "
+                    "it will finish in the background"
+                )
+            time.sleep(poll_interval_s)
+            status = self.get_info().status
+            if status == SandboxStatus.PAUSED:
+                return
+            if status != SandboxStatus.PAUSING:
+                raise SandboxError(
+                    f"Sandbox {self.id} did not pause: "
+                    f"status is {SandboxStatus(status).value}"
+                )
 
     def resume(self) -> None:
         """Resume a paused sandbox.

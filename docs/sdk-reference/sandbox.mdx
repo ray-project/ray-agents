@@ -179,15 +179,19 @@ print(info.status.value)  # e.g. "active" — see SandboxStatus
 
 ### `pause`
 
-Checkpoint the VM state to disk. The sandbox transitions to `paused`. Returns nothing.
+Checkpoint the VM state to disk and return once the sandbox is `paused`. Returns nothing.
+
+Waits up to 30 seconds by default (`timeoutMs` / `timeout`). If the host has not finished by then the call throws a timeout error, but the pause itself carries on — `getInfo()` / `get_info()` reports `paused` once it lands.
 
 <CodeGroup>
 ```typescript TypeScript
 await sandbox.pause()
+await sandbox.pause({ timeoutMs: 120_000 })
 ```
 
 ```python Python
 sandbox.pause()
+sandbox.pause(timeout=120)
 ```
 
 </CodeGroup>

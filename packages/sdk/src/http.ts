@@ -18,7 +18,7 @@ import {
 } from "./errors.js"
 import type { ApiExecStreamEvent } from "./types.js"
 
-const DEFAULT_TIMEOUT_MS = 30_000
+export const DEFAULT_TIMEOUT_MS = 30_000
 
 const SDK_VERSION = "0.8.3"
 const USER_AGENT = `@superserve/sdk/${SDK_VERSION} (node/${

@@ -8,6 +8,7 @@ import httpx
 import pytest
 import respx
 from superserve import AsyncSandbox, SandboxError, SandboxStatus, ValidationError
+from superserve.errors import SandboxTimeoutError
 
 API = "https://api.example.com"
 
@@ -230,6 +231,81 @@ class TestAsyncSandboxSmoke:
             )
             sbx = await AsyncSandbox.connect("sbx-1")
             await sbx.kill()  # Should NOT raise
+
+    async def test_pause_sends_prefer_respond_async(self) -> None:
+        with respx.mock() as router:
+            router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+                return_value=httpx.Response(200, json=_raw())
+            )
+            pause_route = router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+                return_value=httpx.Response(204)
+            )
+            sbx = await AsyncSandbox.connect("sbx-1")
+            try:
+                await sbx.pause()
+                assert (
+                    pause_route.calls.last.request.headers["Prefer"] == "respond-async"
+                )
+            finally:
+                await sbx._close_http_client()
+
+    async def test_pause_follows_202_until_paused(self) -> None:
+        with respx.mock() as router:
+            router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+                return_value=httpx.Response(200, json=_raw())
+            )
+            pause_route = router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+                return_value=httpx.Response(202, json={"status": "pausing"})
+            )
+            info_route = router.get(f"{API}/sandboxes/sbx-1").mock(
+                side_effect=[
+                    httpx.Response(200, json=_raw(status="pausing")),
+                    httpx.Response(200, json=_raw(status="paused")),
+                ]
+            )
+            sbx = await AsyncSandbox.connect("sbx-1")
+            try:
+                assert await sbx.pause(poll_interval_s=0.001) is None
+                assert pause_route.call_count == 1
+                assert info_route.call_count == 2
+            finally:
+                await sbx._close_http_client()
+
+    async def test_pause_raises_when_sandbox_fails_while_pausing(self) -> None:
+        with respx.mock() as router:
+            router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+                return_value=httpx.Response(200, json=_raw())
+            )
+            router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+                return_value=httpx.Response(202, json={"status": "pausing"})
+            )
+            router.get(f"{API}/sandboxes/sbx-1").mock(
+                return_value=httpx.Response(200, json=_raw(status="failed"))
+            )
+            sbx = await AsyncSandbox.connect("sbx-1")
+            try:
+                with pytest.raises(SandboxError, match="did not pause"):
+                    await sbx.pause(poll_interval_s=0.001)
+            finally:
+                await sbx._close_http_client()
+
+    async def test_pause_times_out_while_still_pausing(self) -> None:
+        with respx.mock() as router:
+            router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+                return_value=httpx.Response(200, json=_raw())
+            )
+            router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+                return_value=httpx.Response(202, json={"status": "pausing"})
+            )
+            router.get(f"{API}/sandboxes/sbx-1").mock(
+                return_value=httpx.Response(200, json=_raw(status="pausing"))
+            )
+            sbx = await AsyncSandbox.connect("sbx-1")
+            try:
+                with pytest.raises(SandboxTimeoutError, match="still pausing"):
+                    await sbx.pause(timeout=0.05, poll_interval_s=0.001)
+            finally:
+                await sbx._close_http_client()
 
     async def test_pause_returns_none(self) -> None:
         with respx.mock() as router:

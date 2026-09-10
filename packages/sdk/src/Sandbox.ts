@@ -16,9 +16,9 @@
 
 import { Commands } from "./commands.js"
 import { previewUrl, type ResolvedConfig, resolveConfig } from "./config.js"
-import { NotFoundError, SandboxError } from "./errors.js"
+import { NotFoundError, SandboxError, TimeoutError } from "./errors.js"
 import { Files } from "./files.js"
-import { request, requestVoid } from "./http.js"
+import { DEFAULT_TIMEOUT_MS, request, requestVoid } from "./http.js"
 import type {
   ApiNetworkPage,
   ApiSandboxResponse,
@@ -339,15 +339,47 @@ export class Sandbox {
   }
 
   /**
-   * Pause this sandbox. The sandbox transitions to `paused`.
-   * All running processes and file state are preserved.
+   * Pause this sandbox and return once it is `paused`. All running processes
+   * and file state are preserved.
+   *
+   * `timeoutMs` bounds the whole wait (default 30s). If the host has not
+   * finished by then a `TimeoutError` is thrown but the pause itself carries
+   * on; `getInfo()` reports `paused` once it lands.
    */
-  async pause(): Promise<void> {
-    await requestVoid({
+  async pause(
+    options: {
+      timeoutMs?: number
+      pollIntervalMs?: number
+      signal?: AbortSignal
+    } = {},
+  ): Promise<void> {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    const pollMs = options.pollIntervalMs ?? 1000
+    const deadline = Date.now() + timeoutMs
+    const raw = await request<{ status?: string } | undefined>({
       method: "POST",
       url: `${this._config.baseUrl}/sandboxes/${this.id}/pause`,
-      headers: { "X-API-Key": this._config.apiKey },
+      headers: { "X-API-Key": this._config.apiKey, Prefer: "respond-async" },
+      timeoutMs,
+      signal: options.signal,
     })
+    if (raw?.status !== "pausing") return
+    while (true) {
+      if (options.signal?.aborted) throw new SandboxError("aborted")
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          `Sandbox ${this.id} is still pausing after ${timeoutMs}ms; it will finish in the background`,
+        )
+      }
+      await new Promise((r) => setTimeout(r, pollMs))
+      const { status } = await this.getInfo()
+      if (status === "paused") return
+      if (status !== "pausing") {
+        throw new SandboxError(
+          `Sandbox ${this.id} did not pause: status is ${status}`,
+        )
+      }
+    }
   }
 
   /**

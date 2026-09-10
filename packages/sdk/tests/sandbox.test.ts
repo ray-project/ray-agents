@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { ValidationError } from "../src/errors.js"
+import { TimeoutError, ValidationError } from "../src/errors.js"
 import { Sandbox } from "../src/Sandbox.js"
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -359,6 +359,59 @@ describe("Sandbox instance methods", () => {
     const [url, init] = mock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe("https://api.superserve.ai/sandboxes/sbx-1/pause")
     expect(init.method).toBe("POST")
+  })
+
+  it("sandbox.pause sends Prefer: respond-async and follows a 202 until paused", async () => {
+    const sandbox = await makeSandbox()
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "pausing" }, 202))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...baseSandbox, status: "pausing" }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ ...baseSandbox, status: "paused" }))
+    vi.stubGlobal("fetch", mock)
+
+    await expect(sandbox.pause({ pollIntervalMs: 1 })).resolves.toBeUndefined()
+
+    const [, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect((init.headers as Record<string, string>).Prefer).toBe(
+      "respond-async",
+    )
+    expect(mock).toHaveBeenCalledTimes(3)
+    expect((mock.mock.calls[2] as [string])[0]).toBe(
+      "https://api.superserve.ai/sandboxes/sbx-1",
+    )
+  })
+
+  it("sandbox.pause rejects when the sandbox fails while pausing", async () => {
+    const sandbox = await makeSandbox()
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "pausing" }, 202))
+      .mockImplementation(async () =>
+        jsonResponse({ ...baseSandbox, status: "failed" }),
+      )
+    vi.stubGlobal("fetch", mock)
+
+    await expect(sandbox.pause({ pollIntervalMs: 1 })).rejects.toThrow(
+      /did not pause/,
+    )
+  })
+
+  it("sandbox.pause times out while the sandbox is still pausing", async () => {
+    const sandbox = await makeSandbox()
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "pausing" }, 202))
+      .mockImplementation(async () =>
+        jsonResponse({ ...baseSandbox, status: "pausing" }),
+      )
+    vi.stubGlobal("fetch", mock)
+
+    await expect(
+      sandbox.pause({ timeoutMs: 30, pollIntervalMs: 1 }),
+    ).rejects.toBeInstanceOf(TimeoutError)
   })
 
   it("sandbox.attachSecret POSTs /secrets with env_key and secret_name", async () => {

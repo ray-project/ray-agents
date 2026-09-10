@@ -17,7 +17,7 @@ active  ↔  paused  →  deleted
 
 ## Pause
 
-`pause()` checkpoints the full VM state (memory, processes, filesystem) to disk and stops billing for compute.
+`pause()` checkpoints the full VM state (memory, processes, filesystem) to disk and stops billing for compute. It returns once the sandbox is `paused`; large sandboxes can take a while, so pass a longer timeout if the default 30 seconds is not enough.
 
 <CodeGroup>
 ```typescript TypeScript {5}
