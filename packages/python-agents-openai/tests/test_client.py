@@ -60,3 +60,40 @@ def test_sandbox_run_config_accepts_client():
     client = SuperserveSandboxClient()
     config = SandboxRunConfig(client=client)
     assert config.client is client
+
+
+def test_deserialize_session_state():
+    import uuid
+    from agents.sandbox.snapshot import resolve_snapshot
+    from superserve_agents_openai.client import SuperserveSandboxSessionState
+
+    client = SuperserveSandboxClient()
+    orig_state = SuperserveSandboxSessionState(
+        session_id=uuid.uuid4(),
+        sandbox_id="sbx_test_deserialized",
+        manifest=Manifest(root="/workspace"),
+        snapshot=resolve_snapshot(None, "dummy"),
+    )
+    payload = orig_state.model_dump(mode="json")
+    state = client.deserialize_session_state(payload)
+    assert isinstance(state, SuperserveSandboxSessionState)
+    assert state.sandbox_id == "sbx_test_deserialized"
+    assert state.session_id == orig_state.session_id
+
+
+@pytest.mark.asyncio
+async def test_resume_not_implemented():
+    import uuid
+    from agents.sandbox.snapshot import resolve_snapshot
+    from superserve_agents_openai.client import SuperserveSandboxSessionState
+
+    client = SuperserveSandboxClient()
+    state = SuperserveSandboxSessionState(
+        session_id=uuid.uuid4(),
+        sandbox_id="sbx_123",
+        manifest=Manifest(root="/workspace"),
+        snapshot=resolve_snapshot(None, "dummy"),
+    )
+    with pytest.raises(NotImplementedError, match="Session resume is not yet supported"):
+        await client.resume(state)
+

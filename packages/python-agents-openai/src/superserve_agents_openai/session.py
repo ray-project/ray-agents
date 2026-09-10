@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import io
+import logging
+import math
 import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agents.sandbox.errors import (
+    ExecTimeoutError,
+    ExecTransportError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -13,13 +17,15 @@ from agents.sandbox.errors import (
 )
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.types import ExecResult, User
-from agents.sandbox.workspace_paths import sandbox_path_str
-from superserve.errors import NotFoundError
+from agents.sandbox.workspace_paths import posix_path_for_error, sandbox_path_str
+from superserve.errors import NotFoundError, SandboxTimeoutError
 from superserve.types import SandboxStatus
 
 if TYPE_CHECKING:
     from superserve import AsyncSandbox
     from .client import SuperserveSandboxSessionState
+
+logger = logging.getLogger(__name__)
 
 
 class SuperserveSandboxSession(BaseSandboxSession):
@@ -27,7 +33,6 @@ class SuperserveSandboxSession(BaseSandboxSession):
 
     state: SuperserveSandboxSessionState
     _sandbox: AsyncSandbox
-    _workspace_root_ready: bool
 
     def __init__(
         self,
@@ -37,20 +42,21 @@ class SuperserveSandboxSession(BaseSandboxSession):
     ) -> None:
         self.state = state
         self._sandbox = sandbox
-        self._workspace_root_ready = state.workspace_root_ready
 
     async def _after_start(self) -> None:
         await super()._after_start()
-        self._workspace_root_ready = True
+        self.state.workspace_root_ready = True
 
     def _mark_workspace_root_ready_from_probe(self) -> None:
         super()._mark_workspace_root_ready_from_probe()
-        self._workspace_root_ready = True
+        self.state.workspace_root_ready = True
 
-    async def shutdown(self) -> None:
+    async def _shutdown_backend(self) -> None:
         """Release underlying sandbox microVM resources."""
-        if hasattr(self._sandbox, "kill"):
+        try:
             await self._sandbox.kill()
+        except Exception as e:
+            logger.debug("Failed to cleanly kill sandbox microVM: %s", e)
 
     async def _exec_internal(
         self,
@@ -58,18 +64,38 @@ class SuperserveSandboxSession(BaseSandboxSession):
         timeout: float | None = None,
     ) -> ExecResult:
         command_list = [str(c) for c in command]
+        if not command_list:
+            return ExecResult(exit_code=0, stdout=b"", stderr=b"")
+
         cmd_str = (
             command_list[0] if len(command_list) == 1 else shlex.join(command_list)
         )
-        is_ready = self._workspace_root_ready or self.state.workspace_root_ready
-        cwd = self.state.manifest.root if is_ready else None
-        timeout_seconds = int(timeout) if timeout is not None else None
-
-        res = await self._sandbox.commands.run(
-            cmd_str,
-            cwd=cwd,
-            timeout_seconds=timeout_seconds,
+        cwd = (
+            str(self.state.manifest.root)
+            if (self.state.workspace_root_ready and self.state.manifest.root)
+            else None
         )
+        timeout_seconds = max(1, math.ceil(timeout)) if timeout is not None else None
+
+        try:
+            res = await self._sandbox.commands.run(
+                cmd_str,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+            )
+        except SandboxTimeoutError as e:
+            raise ExecTimeoutError(
+                command=command,
+                timeout_s=timeout,
+                cause=e,
+            ) from e
+        except Exception as e:
+            raise ExecTransportError(
+                command=command,
+                cause=e,
+                message=str(e),
+            ) from e
+
         return ExecResult(
             exit_code=res.exit_code,
             stdout=res.stdout.encode("utf-8", errors="replace"),
@@ -87,14 +113,16 @@ class SuperserveSandboxSession(BaseSandboxSession):
 
         workspace_path = await self._validate_path_access(path)
         path_str = sandbox_path_str(workspace_path)
+        if not path_str.startswith("/"):
+            path_str = f"/{path_str}"
 
         try:
             content = await self._sandbox.files.read(path_str)
             return io.BytesIO(content)
         except NotFoundError as e:
-            raise WorkspaceReadNotFoundError(path=path, cause=e) from e
+            raise WorkspaceReadNotFoundError(path=posix_path_for_error(path), cause=e) from e
         except Exception as e:
-            raise WorkspaceArchiveReadError(path=path, cause=e) from e
+            raise WorkspaceArchiveReadError(path=posix_path_for_error(path), cause=e) from e
 
     async def write(
         self,
@@ -106,19 +134,27 @@ class SuperserveSandboxSession(BaseSandboxSession):
         if user is not None:
             await self._check_write_with_exec(path, user=user)
 
+        workspace_path = await self._validate_path_access(path, for_write=True)
+        path_str = sandbox_path_str(workspace_path)
+        if not path_str.startswith("/"):
+            path_str = f"/{path_str}"
+
         payload = data.read()
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
-            raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
-
-        workspace_path = await self._validate_path_access(path, for_write=True)
-        path_str = sandbox_path_str(workspace_path)
+            raise WorkspaceWriteTypeError(
+                path=posix_path_for_error(path),
+                actual_type=type(payload).__name__,
+            )
 
         try:
             await self._sandbox.files.write(path_str, bytes(payload))
         except Exception as e:
-            raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
+            raise WorkspaceArchiveWriteError(
+                path=posix_path_for_error(workspace_path),
+                cause=e,
+            ) from e
 
     async def running(self) -> bool:
         try:

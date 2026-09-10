@@ -79,9 +79,7 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
         return self._wrap_session(inner)
 
     async def delete(self, session: SandboxSession) -> SandboxSession:
-        inner = getattr(session, "_inner", session)
-        if isinstance(inner, SuperserveSandboxSession):
-            await inner.shutdown()
+        await session.shutdown()
         return session
 
     async def resume(self, state: SandboxSessionState) -> SandboxSession:

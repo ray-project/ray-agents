@@ -17,6 +17,7 @@ from agents import ModelSettings, Runner
 from agents.items import ToolCallItem
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
+from agents.sandbox.session.sandbox_session import SandboxSession
 from agents.sandbox.capabilities import LocalDirLazySkillSource, Skills
 from agents.sandbox.capabilities.capabilities import Capabilities
 from agents.sandbox.entries import LocalDir
@@ -63,7 +64,7 @@ def build_agent(model: str) -> SandboxAgent[None]:
     )
 
 
-async def _read_workspace_text(session, path: Path) -> str:
+async def _read_workspace_text(session: SandboxSession, path: Path) -> str:
     handle = await session.read(path)
     try:
         payload = handle.read()
@@ -156,12 +157,17 @@ async def main(model: str, prompt: str) -> None:
                 )
             except Exception as e:
                 error_msg = str(e)
-                print(
-                    f"\n[Notice] OpenAI model request stopped: {error_msg}\n"
-                    "The Superserve sandbox adapter, microVM provisioning, command execution, and workspace materialization are all working!\n"
-                    "Once your OPENAI_API_KEY has active credits and access to the model, this agent loop will complete autonomously."
-                )
-                return
+                if any(
+                    token in error_msg.lower()
+                    for token in ("insufficient_quota", "quota", "429", "unauthorized", "api_key")
+                ):
+                    print(
+                        f"\n[Notice] OpenAI model request stopped: {error_msg}\n"
+                        "The Superserve sandbox adapter, microVM provisioning, command execution, and workspace materialization are all working!\n"
+                        "Once your OPENAI_API_KEY has active credits and access to the model, this agent loop will complete autonomously."
+                    )
+                    raise SystemExit(1)
+                raise
 
             tool_calls = [
                 item for item in result.new_items if isinstance(item, ToolCallItem)
