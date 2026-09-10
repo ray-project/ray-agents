@@ -80,11 +80,8 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
 
     async def delete(self, session: SandboxSession) -> SandboxSession:
         inner = getattr(session, "_inner", session)
-        if isinstance(inner, SuperserveSandboxSession) and inner._sandbox is not None:
-            if hasattr(inner._sandbox, "kill"):
-                await inner._sandbox.kill()
-            elif hasattr(inner._sandbox, "delete"):
-                await inner._sandbox.delete()
+        if isinstance(inner, SuperserveSandboxSession):
+            await inner.shutdown()
         return session
 
     async def resume(self, state: SandboxSessionState) -> SandboxSession:

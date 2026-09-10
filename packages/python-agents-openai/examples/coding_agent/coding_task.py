@@ -121,12 +121,9 @@ def _saw_target_test_command(tool_calls: list[ToolCallItem]) -> bool:
         arguments = _tool_call_arguments(item)
         cmd = arguments.get("cmd")
         workdir = arguments.get("workdir")
-        if cmd == TARGET_TEST_CMD and workdir == "repo":
-            return True
         if isinstance(cmd, str) and TARGET_TEST_CMD in cmd:
-            return True
-        if isinstance(cmd, str) and workdir == "repo" and TARGET_TEST_CMD in cmd:
-            return True
+            if workdir == "repo" or not workdir:
+                return True
 
     return False
 

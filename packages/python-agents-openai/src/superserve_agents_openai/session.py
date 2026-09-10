@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import shlex
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from agents.sandbox.errors import (
     WorkspaceArchiveReadError,
@@ -18,6 +18,7 @@ from superserve.errors import NotFoundError
 from superserve.types import SandboxStatus
 
 if TYPE_CHECKING:
+    from superserve import AsyncSandbox
     from .client import SuperserveSandboxSessionState
 
 
@@ -25,14 +26,14 @@ class SuperserveSandboxSession(BaseSandboxSession):
     """Superserve microVM sandbox session implementation."""
 
     state: SuperserveSandboxSessionState
-    _sandbox: Any
+    _sandbox: AsyncSandbox
     _workspace_root_ready: bool
 
     def __init__(
         self,
         *,
         state: SuperserveSandboxSessionState,
-        sandbox: Any,
+        sandbox: AsyncSandbox,
     ) -> None:
         self.state = state
         self._sandbox = sandbox
@@ -45,6 +46,11 @@ class SuperserveSandboxSession(BaseSandboxSession):
     def _mark_workspace_root_ready_from_probe(self) -> None:
         super()._mark_workspace_root_ready_from_probe()
         self._workspace_root_ready = True
+
+    async def shutdown(self) -> None:
+        """Release underlying sandbox microVM resources."""
+        if hasattr(self._sandbox, "kill"):
+            await self._sandbox.kill()
 
     async def _exec_internal(
         self,

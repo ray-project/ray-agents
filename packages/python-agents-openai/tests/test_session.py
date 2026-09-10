@@ -90,3 +90,24 @@ async def test_read_not_found(session, mock_sandbox):
     mock_sandbox.files.read.side_effect = NotFoundError("file not found")
     with pytest.raises(WorkspaceReadNotFoundError):
         await session.read(Path("/workspace/missing.txt"))
+
+
+@pytest.mark.asyncio
+async def test_write_invalid_type(session):
+    from agents.sandbox.errors import WorkspaceWriteTypeError
+
+    session._workspace_root_ready = True
+    bad_stream = MagicMock()
+    bad_stream.read.return_value = 12345  # Not bytes or str
+    with pytest.raises(WorkspaceWriteTypeError):
+        await session.write(Path("/workspace/test.txt"), bad_stream)
+
+
+@pytest.mark.asyncio
+async def test_read_archive_error(session, mock_sandbox):
+    from agents.sandbox.errors import WorkspaceArchiveReadError
+
+    session._workspace_root_ready = True
+    mock_sandbox.files.read.side_effect = RuntimeError("network failure")
+    with pytest.raises(WorkspaceArchiveReadError):
+        await session.read(Path("/workspace/error.txt"))
