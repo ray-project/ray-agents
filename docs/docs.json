@@ -211,6 +211,7 @@
               "GET /billing/pricing",
               "GET /billing/pricing/public",
               "GET /billing/summary",
+              "GET /billing/usage-series",
               "GET /teams/{team_id}/billing/periods",
               "GET /teams/{team_id}/billing/periods/{period_id}/export-preview",
               "GET /teams/{team_id}/billing/usage",
