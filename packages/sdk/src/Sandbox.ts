@@ -370,7 +370,7 @@ export class Sandbox {
     // reaches into requests, their retries and backoff, and body reads.
     const deadline = new AbortController()
     const deadlineTimer = setTimeout(() => deadline.abort(), timeoutMs)
-    const signal = composeSignals(deadline.signal, options.signal)
+    const { signal, release } = composeSignals(deadline.signal, options.signal)
     const stillPausing = () =>
       new TimeoutError(
         `Sandbox ${this.id} is still pausing after ${timeoutMs}ms; it will finish in the background`,
@@ -417,6 +417,7 @@ export class Sandbox {
       throw err
     } finally {
       clearTimeout(deadlineTimer)
+      release()
     }
   }
 

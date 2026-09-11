@@ -308,7 +308,7 @@ describe("composeSignals", () => {
 
     const a = new AbortController()
     const b = new AbortController()
-    const composed = composeSignals(a.signal, b.signal)
+    const { signal: composed } = composeSignals(a.signal, b.signal)
     expect(composed.aborted).toBe(false)
     b.abort(new Error("caller cancelled"))
     expect(composed.aborted).toBe(true)
@@ -317,12 +317,29 @@ describe("composeSignals", () => {
     const already = new AbortController()
     already.abort()
     expect(
-      composeSignals(new AbortController().signal, already.signal).aborted,
+      composeSignals(new AbortController().signal, already.signal).signal
+        .aborted,
     ).toBe(true)
+  })
+
+  it("release detaches the fallback listeners from long-lived signals", () => {
+    // @ts-expect-error simulate a runtime without AbortSignal.any
+    AbortSignal.any = undefined
+
+    const internal = new AbortController()
+    const user = new AbortController()
+    const { signal: composed, release } = composeSignals(
+      internal.signal,
+      user.signal,
+    )
+    release()
+    user.abort()
+    internal.abort()
+    expect(composed.aborted).toBe(false)
   })
 
   it("returns the internal signal alone when no caller signal is given", () => {
     const internal = new AbortController().signal
-    expect(composeSignals(internal)).toBe(internal)
+    expect(composeSignals(internal).signal).toBe(internal)
   })
 })

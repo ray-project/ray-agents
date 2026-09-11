@@ -60,25 +60,36 @@ interface RequestOptions {
 export function composeSignals(
   internal: AbortSignal,
   user?: AbortSignal,
-): AbortSignal {
-  if (!user) return internal
+): { signal: AbortSignal; release: () => void } {
+  if (!user) return { signal: internal, release: () => {} }
   if (typeof AbortSignal.any === "function") {
-    return AbortSignal.any([internal, user])
+    return { signal: AbortSignal.any([internal, user]), release: () => {} }
   }
-  // Older runtimes (Node before 18.17): forward whichever aborts first.
+  // Older runtimes (Node before 18.17): forward whichever aborts first. The
+  // listeners sit on signals that may outlive this request, so the caller
+  // releases them once the composed signal is no longer needed.
   const controller = new AbortController()
-  const forward = (source: AbortSignal) => {
-    if (source.aborted) {
-      controller.abort(source.reason)
-      return
-    }
-    source.addEventListener("abort", () => controller.abort(source.reason), {
-      once: true,
-    })
+  const onInternal = () => {
+    release()
+    controller.abort(internal.reason)
   }
-  forward(internal)
-  forward(user)
-  return controller.signal
+  const onUser = () => {
+    release()
+    controller.abort(user.reason)
+  }
+  const release = () => {
+    internal.removeEventListener("abort", onInternal)
+    user.removeEventListener("abort", onUser)
+  }
+  if (internal.aborted) {
+    controller.abort(internal.reason)
+  } else if (user.aborted) {
+    controller.abort(user.reason)
+  } else {
+    internal.addEventListener("abort", onInternal)
+    user.addEventListener("abort", onUser)
+  }
+  return { signal: controller.signal, release }
 }
 
 /** Sleep that ends early, rejecting with an AbortError, if signal aborts. */
@@ -180,7 +191,10 @@ async function retryableFetch(
       controller.abort()
     }, opts.timeoutMs)
 
-    const signal = composeSignals(controller.signal, opts.userSignal)
+    const { signal, release } = composeSignals(
+      controller.signal,
+      opts.userSignal,
+    )
 
     try {
       const res = await fetch(input, { ...init, signal })
@@ -236,6 +250,7 @@ async function retryableFetch(
       throw err
     } finally {
       clearTimeout(timer)
+      release()
     }
   }
 
@@ -539,7 +554,7 @@ export async function streamSSE<TEvent = ApiExecStreamEvent>(opts: {
     controller.abort()
   }, timeoutMs)
 
-  const signal = composeSignals(controller.signal, userSignal)
+  const { signal, release } = composeSignals(controller.signal, userSignal)
 
   try {
     const init: RequestInit = {
@@ -616,6 +631,7 @@ export async function streamSSE<TEvent = ApiExecStreamEvent>(opts: {
       { cause: err },
     )
   } finally {
+    release()
     if (timer) clearTimeout(timer)
   }
 }
