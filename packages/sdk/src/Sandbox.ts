@@ -386,15 +386,23 @@ export class Sandbox {
       if (raw?.status !== "pausing") return
       while (true) {
         await sleep(pollMs, signal)
-        const info = await request<ApiSandboxResponse>({
-          method: "GET",
-          url: `${this._config.baseUrl}/sandboxes/${this.id}`,
-          headers: { "X-API-Key": this._config.apiKey },
-          signal,
-        })
+        let info: ApiSandboxResponse
+        try {
+          info = await request<ApiSandboxResponse>({
+            method: "GET",
+            url: `${this._config.baseUrl}/sandboxes/${this.id}`,
+            headers: { "X-API-Key": this._config.apiKey },
+            signal,
+          })
+        } catch (err) {
+          // Gone while pausing: auto-delete on pause removes the sandbox as
+          // soon as the pause lands, so there is nothing left to wait for.
+          if (err instanceof NotFoundError) return
+          throw err
+        }
         if (deadline.signal.aborted) throw stillPausing()
         const { status } = toSandboxInfo(info)
-        if (status === "paused") return
+        if (status === "paused" || status === "deleted") return
         if (status !== "pausing") {
           throw new SandboxError(
             `Sandbox ${this.id} did not pause: status is ${status}`,

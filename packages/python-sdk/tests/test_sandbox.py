@@ -909,3 +909,21 @@ def test_pause_deadline_covers_a_retry_after_wait(monkeypatch):
             assert get.call_count == 1
         finally:
             sbx._close_http_client()
+
+
+def test_pause_treats_a_sandbox_deleted_on_pause_as_completed() -> None:
+    with respx.mock() as router:
+        router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+            return_value=httpx.Response(200, json=_raw())
+        )
+        router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+            return_value=httpx.Response(202, json={"status": "pausing"})
+        )
+        router.get(f"{API}/sandboxes/sbx-1").mock(
+            return_value=httpx.Response(404, json={"error": {"message": "gone"}})
+        )
+        sbx = Sandbox.connect("sbx-1")
+        try:
+            assert sbx.pause(poll_interval_s=0.001) is None
+        finally:
+            sbx._close_http_client()

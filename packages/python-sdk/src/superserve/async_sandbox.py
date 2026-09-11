@@ -447,11 +447,15 @@ class AsyncSandbox:
                 )
             except DeadlineExceeded as exc:
                 raise still_pausing from exc
+            except NotFoundError:
+                # Gone while pausing: auto-delete on pause removes the sandbox
+                # as soon as the pause lands, so there is nothing left to wait for.
+                return
             except SandboxTimeoutError:
                 # One slow poll; the deadline decides whether to keep going.
                 continue
             status = to_sandbox_info(raw).status
-            if status == SandboxStatus.PAUSED:
+            if status in (SandboxStatus.PAUSED, SandboxStatus.DELETED):
                 return
             if status != SandboxStatus.PAUSING:
                 raise SandboxError(

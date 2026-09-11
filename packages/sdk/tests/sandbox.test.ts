@@ -690,6 +690,17 @@ describe("Sandbox instance methods", () => {
     }
   })
 
+  it("sandbox.pause treats a sandbox deleted on pause as completed", async () => {
+    const sandbox = await makeSandbox()
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "pausing" }, 202))
+      .mockImplementation(async () => errorResponse(404, "not_found", "gone"))
+    vi.stubGlobal("fetch", mock)
+
+    await expect(sandbox.pause({ pollIntervalMs: 1 })).resolves.toBeUndefined()
+  })
+
   it("sandbox.attachSecret POSTs /secrets with env_key and secret_name", async () => {
     const sandbox = await makeSandbox()
     const mock = vi.fn(async () =>

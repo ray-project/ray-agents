@@ -181,7 +181,7 @@ print(info.status.value)  # e.g. "active" — see SandboxStatus
 
 Checkpoint the VM state to disk and return once the sandbox is `paused`. Returns nothing.
 
-Waits up to five minutes by default (`timeoutMs` / `timeout`); a fast pause still returns as soon as it lands. If the host has not finished by the deadline the call throws a timeout error, but the pause itself carries on — `getInfo()` / `get_info()` reports `paused` once it lands.
+Waits up to five minutes by default (`timeoutMs` / `timeout`); a fast pause still returns as soon as it lands. If the host has not finished by the deadline the call throws a timeout error, but the pause itself carries on — `getInfo()` / `get_info()` reports `paused` once it lands. A sandbox set to delete on pause (`autoDeleteSeconds: 0` / `auto_delete_seconds=0`) is gone as soon as the pause lands; `pause()` treats that as completion.
 
 <CodeGroup>
 ```typescript TypeScript
