@@ -177,7 +177,7 @@ async function retryableFetch(
     retryable: boolean
     userSignal?: AbortSignal
   },
-): Promise<Response> {
+): Promise<{ res: Response; release: () => void }> {
   const maxAttempts = opts.retryable
     ? (opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS)
     : 1
@@ -195,6 +195,10 @@ async function retryableFetch(
       controller.signal,
       opts.userSignal,
     )
+    // On the fallback path the caller keeps the forwarding alive through
+    // the body read and releases it afterwards; a retried attempt releases
+    // its own here.
+    let handedOff = false
 
     try {
       const res = await fetch(input, { ...init, signal })
@@ -202,7 +206,8 @@ async function retryableFetch(
       // Retry on specific 5xx / 429
       if (opts.retryable && RETRYABLE_STATUSES.has(res.status)) {
         if (attempt >= maxAttempts) {
-          return res
+          handedOff = true
+          return { res, release }
         }
         let delay: number | null = null
         if (res.status === 429) {
@@ -222,7 +227,8 @@ async function retryableFetch(
         continue
       }
 
-      return res
+      handedOff = true
+      return { res, release }
     } catch (err) {
       lastError = err
 
@@ -250,7 +256,7 @@ async function retryableFetch(
       throw err
     } finally {
       clearTimeout(timer)
-      release()
+      if (!handedOff) release()
     }
   }
 
@@ -295,7 +301,7 @@ export async function request<T>(opts: RequestOptions): Promise<T> {
   }
 
   try {
-    const res = await retryableFetch(
+    const { res, release } = await retryableFetch(
       url,
       {
         method,
@@ -304,28 +310,31 @@ export async function request<T>(opts: RequestOptions): Promise<T> {
       },
       { timeoutMs, retryable, userSignal },
     )
+    try {
+      if (!res.ok) {
+        const errorBody = await readErrorBody(res)
+        throw mapApiError(res.status, errorBody)
+      }
 
-    if (!res.ok) {
-      const errorBody = await readErrorBody(res)
-      throw mapApiError(res.status, errorBody)
+      // 204 No Content
+      if (res.status === 204) {
+        return undefined as T
+      }
+
+      // Untrusted (data-plane) endpoints: read the JSON body with a streaming
+      // byte cap so a hostile sandbox can't make us buffer an unbounded response.
+      if (maxBytes !== undefined) {
+        const bytes = await readBodyWithLimit(res, maxBytes, "Response body")
+        if (bytes.byteLength === 0) return undefined as T
+        return JSON.parse(new TextDecoder().decode(bytes)) as T
+      }
+
+      // Some endpoints legally return 2xx with an empty body.
+      const text = await res.text()
+      return text ? (JSON.parse(text) as T) : (undefined as T)
+    } finally {
+      release()
     }
-
-    // 204 No Content
-    if (res.status === 204) {
-      return undefined as T
-    }
-
-    // Untrusted (data-plane) endpoints: read the JSON body with a streaming
-    // byte cap so a hostile sandbox can't make us buffer an unbounded response.
-    if (maxBytes !== undefined) {
-      const bytes = await readBodyWithLimit(res, maxBytes, "Response body")
-      if (bytes.byteLength === 0) return undefined as T
-      return JSON.parse(new TextDecoder().decode(bytes)) as T
-    }
-
-    // Some endpoints legally return 2xx with an empty body.
-    const text = await res.text()
-    return text ? (JSON.parse(text) as T) : (undefined as T)
   } catch (err) {
     if (err instanceof SandboxError) throw err
     if (err instanceof DOMException && err.name === "AbortError") {
@@ -376,15 +385,18 @@ export async function uploadBytes(opts: {
   }
 
   try {
-    const res = await retryableFetch(
+    const { res, release } = await retryableFetch(
       url,
       { method: "POST", headers: mergedHeaders, body },
       { timeoutMs, retryable: false, userSignal },
     )
-
-    if (!res.ok) {
-      const errorBody = await readErrorBody(res)
-      throw mapApiError(res.status, errorBody)
+    try {
+      if (!res.ok) {
+        const errorBody = await readErrorBody(res)
+        throw mapApiError(res.status, errorBody)
+      }
+    } finally {
+      release()
     }
   } catch (err) {
     if (err instanceof SandboxError) throw err
@@ -490,18 +502,21 @@ export async function downloadBytes(opts: {
   }
 
   try {
-    const res = await retryableFetch(
+    const { res, release } = await retryableFetch(
       url,
       { method: "GET", headers: mergedHeaders },
       { timeoutMs, retryable: true, userSignal },
     )
+    try {
+      if (!res.ok) {
+        const errorBody = await readErrorBody(res)
+        throw mapApiError(res.status, errorBody)
+      }
 
-    if (!res.ok) {
-      const errorBody = await readErrorBody(res)
-      throw mapApiError(res.status, errorBody)
+      return await readBodyWithLimit(res, maxBytes)
+    } finally {
+      release()
     }
-
-    return await readBodyWithLimit(res, maxBytes)
   } catch (err) {
     if (err instanceof SandboxError) throw err
     if (err instanceof DOMException && err.name === "AbortError") {
