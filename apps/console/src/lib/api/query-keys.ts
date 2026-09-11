@@ -148,6 +148,24 @@ export const billingKeys = {
       context.periodStart,
       context.periodEnd,
     ] as const,
+  usageSeries: (context: {
+    cacheScope: string
+    teamKey: string
+    start: string
+    end: string
+    granularity: string
+    timezone: string
+  }) =>
+    [
+      ...billingKeys.all,
+      "usage-series",
+      context.cacheScope,
+      context.teamKey,
+      context.start,
+      context.end,
+      context.granularity,
+      context.timezone,
+    ] as const,
 }
 
 export const templateKeys = {
