@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from types import SimpleNamespace
 
 import inspect
@@ -721,5 +723,45 @@ async def test_pause_treats_a_sandbox_deleted_on_pause_as_completed() -> None:
         sbx = await AsyncSandbox.connect("sbx-1")
         try:
             assert await sbx.pause(poll_interval_s=0.001) is None
+        finally:
+            await sbx._close_http_client()
+
+
+async def test_pause_deadline_bounds_a_slowly_dripped_poll_body(monkeypatch):
+    clock = [0.0]
+
+    async def sleep(n):
+        clock[0] += n
+
+    body = json.dumps(_raw(status="paused")).encode()
+
+    async def drip():
+        for i in range(0, len(body), 8):
+            clock[0] += 0.4
+            yield body[i : i + 8]
+
+    with respx.mock() as router:
+        router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+            return_value=httpx.Response(200, json=_raw())
+        )
+        router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+            return_value=httpx.Response(202, json={"status": "pausing"})
+        )
+        router.get(f"{API}/sandboxes/sbx-1").mock(
+            side_effect=lambda request: httpx.Response(200, content=drip())
+        )
+        sbx = await AsyncSandbox.connect("sbx-1")
+        monkeypatch.setattr(
+            async_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
+        )
+        monkeypatch.setattr(async_module, "asyncio", SimpleNamespace(sleep=sleep))
+        monkeypatch.setattr(
+            http_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
+        )
+        monkeypatch.setattr(http_module, "asyncio", SimpleNamespace(sleep=sleep))
+        try:
+            with pytest.raises(SandboxTimeoutError):
+                await sbx.pause(timeout=1.0, poll_interval_s=0.01)
+            assert clock[0] < 2.0
         finally:
             await sbx._close_http_client()

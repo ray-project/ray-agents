@@ -173,6 +173,68 @@ def _check_deadline(deadline: float | None) -> None:
         raise DeadlineExceeded("Operation deadline exceeded")
 
 
+def _read_within(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    json_body: Any | None,
+    timeout: float,
+    deadline: float | None,
+) -> httpx.Response:
+    """One attempt. With a deadline the body is streamed and the deadline
+    checked as each chunk lands: the HTTP timeout only bounds inactivity,
+    so a slowly dripped body would otherwise run past the budget."""
+    if deadline is None:
+        return client.request(
+            method, url, headers=headers, json=json_body, timeout=timeout
+        )
+    with client.stream(
+        method, url, headers=headers, json=json_body, timeout=timeout
+    ) as streamed:
+        parts: list[bytes] = []
+        for chunk in streamed.iter_bytes():
+            parts.append(chunk)
+            _check_deadline(deadline)
+        return httpx.Response(
+            streamed.status_code,
+            headers=streamed.headers,
+            content=b"".join(parts),
+            request=streamed.request,
+        )
+
+
+async def _async_read_within(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    json_body: Any | None,
+    timeout: float,
+    deadline: float | None,
+) -> httpx.Response:
+    """Async variant of ``_read_within``."""
+    if deadline is None:
+        return await client.request(
+            method, url, headers=headers, json=json_body, timeout=timeout
+        )
+    async with client.stream(
+        method, url, headers=headers, json=json_body, timeout=timeout
+    ) as streamed:
+        parts: list[bytes] = []
+        async for chunk in streamed.aiter_bytes():
+            parts.append(chunk)
+            _check_deadline(deadline)
+        return httpx.Response(
+            streamed.status_code,
+            headers=streamed.headers,
+            content=b"".join(parts),
+            request=streamed.request,
+        )
+
+
 def _do_request_with_retry(
     method: str,
     url: str,
@@ -205,12 +267,14 @@ def _do_request_with_retry(
         for attempt in range(_MAX_ATTEMPTS):
             attempt_timeout = _attempt_timeout(timeout, deadline)
             try:
-                response = client.request(
+                response = _read_within(
+                    client,
                     method_upper,
                     url,
                     headers=headers,
-                    json=json_body,
+                    json_body=json_body,
                     timeout=attempt_timeout,
+                    deadline=deadline,
                 )
             except httpx.TimeoutException as exc:
                 _check_deadline(deadline)
@@ -484,12 +548,14 @@ async def _async_do_request_with_retry(
         for attempt in range(_MAX_ATTEMPTS):
             attempt_timeout = _attempt_timeout(timeout, deadline)
             try:
-                response = await client.request(
+                response = await _async_read_within(
+                    client,
                     method_upper,
                     url,
                     headers=headers,
-                    json=json_body,
+                    json_body=json_body,
                     timeout=attempt_timeout,
+                    deadline=deadline,
                 )
             except httpx.TimeoutException as exc:
                 _check_deadline(deadline)
