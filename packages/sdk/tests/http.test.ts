@@ -7,7 +7,7 @@ import {
   TimeoutError,
   ValidationError,
 } from "../src/errors.js"
-import { request, streamSSE } from "../src/http.js"
+import { composeSignals, request, streamSSE } from "../src/http.js"
 
 type FetchMock = ReturnType<typeof vi.fn>
 
@@ -292,5 +292,54 @@ describe("streamSSE with GET", () => {
     expect(init.method).toBe("GET")
     expect(init.body).toBeUndefined()
     expect(events.length).toBe(2)
+  })
+})
+
+describe("composeSignals", () => {
+  const anySignal = AbortSignal.any
+
+  afterEach(() => {
+    AbortSignal.any = anySignal
+  })
+
+  it("forwards either abort without AbortSignal.any (Node before 18.17)", () => {
+    // @ts-expect-error simulate a runtime without AbortSignal.any
+    AbortSignal.any = undefined
+
+    const a = new AbortController()
+    const b = new AbortController()
+    const { signal: composed } = composeSignals(a.signal, b.signal)
+    expect(composed.aborted).toBe(false)
+    b.abort(new Error("caller cancelled"))
+    expect(composed.aborted).toBe(true)
+    expect((composed.reason as Error).message).toBe("caller cancelled")
+
+    const already = new AbortController()
+    already.abort()
+    expect(
+      composeSignals(new AbortController().signal, already.signal).signal
+        .aborted,
+    ).toBe(true)
+  })
+
+  it("release detaches the fallback listeners from long-lived signals", () => {
+    // @ts-expect-error simulate a runtime without AbortSignal.any
+    AbortSignal.any = undefined
+
+    const internal = new AbortController()
+    const user = new AbortController()
+    const { signal: composed, release } = composeSignals(
+      internal.signal,
+      user.signal,
+    )
+    release()
+    user.abort()
+    internal.abort()
+    expect(composed.aborted).toBe(false)
+  })
+
+  it("returns the internal signal alone when no caller signal is given", () => {
+    const internal = new AbortController().signal
+    expect(composeSignals(internal).signal).toBe(internal)
   })
 })

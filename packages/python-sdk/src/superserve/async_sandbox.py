@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 
 import httpx
 
 from ._config import ResolvedConfig, preview_url, resolve_config
-from ._http import async_api_request
+from ._http import DEFAULT_PAUSE_TIMEOUT, DeadlineExceeded, async_api_request
 from .commands import AsyncCommands, AsyncCommandsDeps
-from .errors import NotFoundError, SandboxError
+from .errors import NotFoundError, SandboxError, SandboxTimeoutError
 from .files import AsyncFiles, AsyncFilesDeps
 from .types import (
     UNSET,
@@ -402,15 +403,69 @@ class AsyncSandbox:
         )
         return PreviewToken(**raw)
 
-    async def pause(self) -> None:
-        """Pause this sandbox. The sandbox transitions to ``paused``."""
+    async def pause(
+        self, *, timeout: float = DEFAULT_PAUSE_TIMEOUT, poll_interval_s: float = 1.0
+    ) -> None:
+        """Pause this sandbox and return once it is ``paused``.
+
+        ``timeout`` bounds the whole wait (five minutes by default: a pause
+        can take a while on a busy host). If the host has not finished by
+        then, :class:`SandboxTimeoutError` is raised but the pause itself
+        carries on; ``get_info()`` reports ``paused`` once it lands.
+        """
         self._require_not_deleted()
-        await async_api_request(
-            "POST",
-            f"{self._config.base_url}/sandboxes/{self.id}/pause",
-            headers={"X-API-Key": self._config.api_key},
-            client=self._http_client,
+        deadline = time.monotonic() + timeout
+        headers = {"X-API-Key": self._config.api_key}
+        still_pausing = SandboxTimeoutError(
+            f"Sandbox {self.id} is still pausing after {timeout}s; "
+            "it will finish in the background"
         )
+        try:
+            raw = await async_api_request(
+                "POST",
+                f"{self._config.base_url}/sandboxes/{self.id}/pause",
+                headers={**headers, "Prefer": "respond-async"},
+                budget=timeout,
+                client=self._http_client,
+            )
+        except DeadlineExceeded as exc:
+            raise still_pausing from exc
+        except SandboxTimeoutError:
+            # The request outlived its own timeout; the pause may still land.
+            # Follow it through the sandbox's status like an accepted one.
+            raw = {"status": "pausing"}
+        if not (isinstance(raw, dict) and raw.get("status") == "pausing"):
+            return
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise still_pausing
+            await asyncio.sleep(min(poll_interval_s, remaining))
+            try:
+                raw = await async_api_request(
+                    "GET",
+                    f"{self._config.base_url}/sandboxes/{self.id}",
+                    headers=headers,
+                    budget=deadline - time.monotonic(),
+                    client=self._http_client,
+                )
+            except DeadlineExceeded as exc:
+                raise still_pausing from exc
+            except NotFoundError:
+                # Gone while pausing: auto-delete on pause removes the sandbox
+                # as soon as the pause lands, so there is nothing left to wait for.
+                return
+            except SandboxTimeoutError:
+                # One slow poll; the deadline decides whether to keep going.
+                continue
+            status = to_sandbox_info(raw).status
+            if status in (SandboxStatus.PAUSED, SandboxStatus.DELETED):
+                return
+            if status != SandboxStatus.PAUSING:
+                raise SandboxError(
+                    f"Sandbox {self.id} did not pause: "
+                    f"status is {SandboxStatus(status).value}"
+                )
 
     async def resume(self) -> None:
         """Resume a paused sandbox.
