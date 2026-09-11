@@ -961,3 +961,20 @@ def test_pause_deadline_bounds_a_slowly_dripped_poll_body(monkeypatch):
             assert clock[0] < 2.0
         finally:
             sbx._close_http_client()
+
+
+def test_read_timeout_follows_the_remaining_budget(monkeypatch):
+    clock = [10.0]
+    monkeypatch.setattr(
+        http_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda n: None),
+    )
+    request = httpx.Request(
+        "GET", f"{API}/sandboxes/sbx-1", extensions={"timeout": {"read": 30.0}}
+    )
+    http_module._tighten_read_timeout(request, deadline=10.4)
+    assert request.extensions["timeout"]["read"] == pytest.approx(0.4)
+    clock[0] = 11.0
+    http_module._tighten_read_timeout(request, deadline=10.4)
+    assert request.extensions["timeout"]["read"] == pytest.approx(0.001)

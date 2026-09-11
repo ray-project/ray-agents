@@ -7,6 +7,7 @@ connection pooling and retry logic for idempotent methods (GET, DELETE).
 from __future__ import annotations
 
 import asyncio
+from asyncio import wait_for as _wait_for
 import json as json_module
 import random
 import sys
@@ -173,6 +174,14 @@ def _check_deadline(deadline: float | None) -> None:
         raise DeadlineExceeded("Operation deadline exceeded")
 
 
+def _tighten_read_timeout(request: httpx.Request, deadline: float) -> None:
+    """Bound the next socket read to what is left of the deadline; the
+    transport consults the request's timeout extension on every read."""
+    ext = request.extensions.get("timeout")
+    if isinstance(ext, dict):
+        ext["read"] = max(deadline - time.monotonic(), 0.001)
+
+
 def _read_within(
     client: httpx.Client,
     method: str,
@@ -194,7 +203,13 @@ def _read_within(
         method, url, headers=headers, json=json_body, timeout=timeout
     ) as streamed:
         parts: list[bytes] = []
-        for chunk in streamed.iter_bytes():
+        chunks = streamed.iter_bytes()
+        while True:
+            _tighten_read_timeout(streamed.request, deadline)
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                break
             parts.append(chunk)
             _check_deadline(deadline)
         return httpx.Response(
@@ -224,7 +239,18 @@ async def _async_read_within(
         method, url, headers=headers, json=json_body, timeout=timeout
     ) as streamed:
         parts: list[bytes] = []
-        async for chunk in streamed.aiter_bytes():
+        chunks = streamed.aiter_bytes()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DeadlineExceeded("Operation deadline exceeded")
+            _tighten_read_timeout(streamed.request, deadline)
+            try:
+                chunk = await _wait_for(chunks.__anext__(), remaining)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError as exc:
+                raise DeadlineExceeded("Operation deadline exceeded") from exc
             parts.append(chunk)
             _check_deadline(deadline)
         return httpx.Response(

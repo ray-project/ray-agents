@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import time
+
+import asyncio
+
 import json
 
 from types import SimpleNamespace
@@ -763,5 +767,33 @@ async def test_pause_deadline_bounds_a_slowly_dripped_poll_body(monkeypatch):
             with pytest.raises(SandboxTimeoutError):
                 await sbx.pause(timeout=1.0, poll_interval_s=0.01)
             assert clock[0] < 2.0
+        finally:
+            await sbx._close_http_client()
+
+
+async def test_pause_deadline_cuts_a_stalled_chunk_read() -> None:
+    body = json.dumps(_raw(status="paused")).encode()
+
+    async def stall():
+        yield body[:4]
+        await asyncio.sleep(2.0)  # the peer goes quiet mid-body
+        yield body[4:]
+
+    with respx.mock() as router:
+        router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+            return_value=httpx.Response(200, json=_raw())
+        )
+        router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+            return_value=httpx.Response(202, json={"status": "pausing"})
+        )
+        router.get(f"{API}/sandboxes/sbx-1").mock(
+            side_effect=lambda request: httpx.Response(200, content=stall())
+        )
+        sbx = await AsyncSandbox.connect("sbx-1")
+        started = time.monotonic()
+        try:
+            with pytest.raises(SandboxTimeoutError):
+                await sbx.pause(timeout=0.2, poll_interval_s=0.001)
+            assert time.monotonic() - started < 1.0
         finally:
             await sbx._close_http_client()
