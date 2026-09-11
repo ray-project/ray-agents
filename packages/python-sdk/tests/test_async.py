@@ -797,3 +797,44 @@ async def test_pause_deadline_cuts_a_stalled_chunk_read() -> None:
             assert time.monotonic() - started < 1.0
         finally:
             await sbx._close_http_client()
+
+
+async def test_pause_follows_a_request_that_outlived_its_timeout_by_polling() -> None:
+    with respx.mock() as router:
+        router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+            return_value=httpx.Response(200, json=_raw())
+        )
+        router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+            side_effect=httpx.ReadTimeout("slow")
+        )
+        router.get(f"{API}/sandboxes/sbx-1").mock(
+            return_value=httpx.Response(200, json=_raw(status="paused"))
+        )
+        sbx = await AsyncSandbox.connect("sbx-1")
+        try:
+            assert await sbx.pause(poll_interval_s=0.001) is None
+        finally:
+            await sbx._close_http_client()
+
+
+@pytest.mark.parametrize("stall_in", ["body", "headers"])
+async def test_async_read_deadline_cuts_a_stalled_response(
+    stalling_server, stall_in: str
+) -> None:
+    server = stalling_server(stall_in)
+    client = httpx.AsyncClient()
+    try:
+        started = time.monotonic()
+        with pytest.raises(SandboxTimeoutError):
+            await http_module._async_read_within(
+                client,
+                "GET",
+                f"http://127.0.0.1:{server.server_port}/sandboxes/sbx-1",
+                headers={},
+                json_body=None,
+                timeout=30.0,
+                deadline=time.monotonic() + 0.2,
+            )
+        assert time.monotonic() - started < 1.5
+    finally:
+        await client.aclose()

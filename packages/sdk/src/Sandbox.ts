@@ -376,13 +376,27 @@ export class Sandbox {
         `Sandbox ${this.id} is still pausing after ${timeoutMs}ms; it will finish in the background`,
       )
     try {
-      const raw = await request<{ status?: string } | undefined>({
-        method: "POST",
-        url: `${this._config.baseUrl}/sandboxes/${this.id}/pause`,
-        headers: { "X-API-Key": this._config.apiKey, Prefer: "respond-async" },
-        timeoutMs: Math.min(DEFAULT_TIMEOUT_MS, timeoutMs),
-        signal,
-      })
+      let raw: { status?: string } | undefined
+      try {
+        raw = await request<{ status?: string } | undefined>({
+          method: "POST",
+          url: `${this._config.baseUrl}/sandboxes/${this.id}/pause`,
+          headers: {
+            "X-API-Key": this._config.apiKey,
+            Prefer: "respond-async",
+          },
+          timeoutMs: Math.min(DEFAULT_TIMEOUT_MS, timeoutMs),
+          signal,
+        })
+      } catch (err) {
+        // The request outlived its own timeout; the pause may still land.
+        // Follow it through the sandbox's status like an accepted one.
+        if (err instanceof TimeoutError && !deadline.signal.aborted) {
+          raw = { status: "pausing" }
+        } else {
+          throw err
+        }
+      }
       if (raw?.status !== "pausing") return
       while (true) {
         await sleep(pollMs, signal)

@@ -802,6 +802,45 @@ describe("Sandbox instance methods", () => {
     }
   })
 
+  it("sandbox.pause follows a request that outlived its own timeout by polling", async () => {
+    const sandbox = await makeSandbox()
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init: RequestInit) => {
+          if (init.method === "POST") {
+            return new Promise<Response>((_resolve, reject) => {
+              init.signal?.addEventListener(
+                "abort",
+                () => reject(new DOMException("aborted", "AbortError")),
+                { once: true },
+              )
+            })
+          }
+          return jsonResponse({ ...baseSandbox, status: "paused" })
+        }),
+      )
+      let outcome: unknown = "pending"
+      const pending = sandbox
+        .pause({ timeoutMs: 120_000, pollIntervalMs: 10 })
+        .then(
+          () => {
+            outcome = "paused"
+          },
+          (e: unknown) => {
+            outcome = e
+          },
+        )
+      await vi.advanceTimersByTimeAsync(30_100)
+      await vi.advanceTimersByTimeAsync(100)
+      await pending
+      expect(outcome).toBe("paused")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("sandbox.attachSecret POSTs /secrets with env_key and secret_name", async () => {
     const sandbox = await makeSandbox()
     const mock = vi.fn(async () =>

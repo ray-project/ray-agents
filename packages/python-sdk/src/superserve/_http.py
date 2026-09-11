@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from asyncio import TimeoutError as _AsyncTimeout
 from asyncio import wait_for as _wait_for
 import json as json_module
 import random
@@ -185,41 +186,41 @@ def _read_within(
     timeout: float,
     deadline: float | None,
 ) -> httpx.Response:
-    """One attempt. With a deadline the body is streamed and the deadline
-    checked as each chunk lands: the HTTP timeout only bounds inactivity,
-    so a slowly dripped body would otherwise run past the budget."""
+    """One attempt. With a deadline the whole exchange, headers and body, runs
+    on a worker and the caller waits only for what is left of the deadline:
+    the HTTP timeout bounds inactivity, not wall time, and a blocking read
+    cannot be interrupted, so a worker that outlives the deadline winds down
+    on its own read timeout."""
     if deadline is None:
         return client.request(
             method, url, headers=headers, json=json_body, timeout=timeout
         )
-    with client.stream(
-        method, url, headers=headers, json=json_body, timeout=timeout
-    ) as streamed:
-        # A blocking read cannot be re-timed or interrupted once the body has
-        # started, so the body is read on a worker and the caller waits only
-        # for what is left of the deadline; a worker that outlives it winds
-        # down on its own read timeout.
-        parts: list[bytes] = []
 
-        def drain() -> None:
+    def exchange() -> httpx.Response:
+        with client.stream(
+            method, url, headers=headers, json=json_body, timeout=timeout
+        ) as streamed:
+            parts: list[bytes] = []
             for chunk in streamed.iter_bytes():
                 parts.append(chunk)
                 _check_deadline(deadline)
+            return httpx.Response(
+                streamed.status_code,
+                headers=streamed.headers,
+                content=b"".join(parts),
+                request=streamed.request,
+            )
 
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
-            pool.submit(drain).result(timeout=max(deadline - time.monotonic(), 0.0))
-        except concurrent.futures.TimeoutError as exc:
-            streamed.close()
-            raise DeadlineExceeded("Operation deadline exceeded") from exc
-        finally:
-            pool.shutdown(wait=False)
-        return httpx.Response(
-            streamed.status_code,
-            headers=streamed.headers,
-            content=b"".join(parts),
-            request=streamed.request,
-        )
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise DeadlineExceeded("Operation deadline exceeded")
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(exchange).result(timeout=remaining)
+    except concurrent.futures.TimeoutError as exc:
+        raise DeadlineExceeded("Operation deadline exceeded") from exc
+    finally:
+        pool.shutdown(wait=False)
 
 
 async def _async_read_within(
@@ -232,34 +233,35 @@ async def _async_read_within(
     timeout: float,
     deadline: float | None,
 ) -> httpx.Response:
-    """Async variant of ``_read_within``."""
+    """Async variant of ``_read_within``: the whole exchange runs under one
+    wall-clock wait and is cancelled at the deadline."""
     if deadline is None:
         return await client.request(
             method, url, headers=headers, json=json_body, timeout=timeout
         )
-    async with client.stream(
-        method, url, headers=headers, json=json_body, timeout=timeout
-    ) as streamed:
-        parts: list[bytes] = []
-        chunks = streamed.aiter_bytes()
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise DeadlineExceeded("Operation deadline exceeded")
-            try:
-                chunk = await _wait_for(chunks.__anext__(), remaining)
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError as exc:
-                raise DeadlineExceeded("Operation deadline exceeded") from exc
-            parts.append(chunk)
-            _check_deadline(deadline)
-        return httpx.Response(
-            streamed.status_code,
-            headers=streamed.headers,
-            content=b"".join(parts),
-            request=streamed.request,
-        )
+
+    async def exchange() -> httpx.Response:
+        async with client.stream(
+            method, url, headers=headers, json=json_body, timeout=timeout
+        ) as streamed:
+            parts: list[bytes] = []
+            async for chunk in streamed.aiter_bytes():
+                parts.append(chunk)
+                _check_deadline(deadline)
+            return httpx.Response(
+                streamed.status_code,
+                headers=streamed.headers,
+                content=b"".join(parts),
+                request=streamed.request,
+            )
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise DeadlineExceeded("Operation deadline exceeded")
+    try:
+        return await _wait_for(exchange(), remaining)
+    except _AsyncTimeout as exc:
+        raise DeadlineExceeded("Operation deadline exceeded") from exc
 
 
 def _do_request_with_retry(

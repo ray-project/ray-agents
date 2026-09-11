@@ -6,7 +6,6 @@ import time
 
 import threading
 
-import http.server
 
 from types import SimpleNamespace
 
@@ -737,7 +736,6 @@ class TestCreateFromTemplate:
 
 class TestConcurrentRefresh:
     def test_serialized_refresh_under_concurrent_401(self) -> None:
-        import threading
 
         sbx_id = "sbx-conc"
         sandbox_host = "sandbox.example.com"
@@ -969,28 +967,11 @@ def test_pause_deadline_bounds_a_slowly_dripped_poll_body(monkeypatch):
             sbx._close_http_client()
 
 
-def test_sync_read_deadline_cuts_a_stalled_body() -> None:
-    body = json.dumps(_raw(status="paused")).encode()
-
-    class Stall(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body[:4])
-            self.wfile.flush()
-            time.sleep(2.0)  # the peer goes quiet mid-body
-            try:
-                self.wfile.write(body[4:])
-            except OSError:
-                pass
-
-        def log_message(self, *args: object) -> None:
-            pass
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Stall)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+@pytest.mark.parametrize("stall_in", ["body", "headers"])
+def test_sync_read_deadline_cuts_a_stalled_response(
+    stalling_server, stall_in: str
+) -> None:
+    server = stalling_server(stall_in)
     client = httpx.Client()
     try:
         started = time.monotonic()
@@ -1007,5 +988,21 @@ def test_sync_read_deadline_cuts_a_stalled_body() -> None:
         assert time.monotonic() - started < 1.5
     finally:
         client.close()
-        server.shutdown()
-        server.server_close()
+
+
+def test_pause_follows_a_request_that_outlived_its_timeout_by_polling() -> None:
+    with respx.mock() as router:
+        router.post(f"{API}/sandboxes/sbx-1/activate").mock(
+            return_value=httpx.Response(200, json=_raw())
+        )
+        router.post(f"{API}/sandboxes/sbx-1/pause").mock(
+            side_effect=httpx.ReadTimeout("slow")
+        )
+        router.get(f"{API}/sandboxes/sbx-1").mock(
+            return_value=httpx.Response(200, json=_raw(status="paused"))
+        )
+        sbx = Sandbox.connect("sbx-1")
+        try:
+            assert sbx.pause(poll_interval_s=0.001) is None
+        finally:
+            sbx._close_http_client()

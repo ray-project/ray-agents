@@ -430,6 +430,10 @@ class AsyncSandbox:
             )
         except DeadlineExceeded as exc:
             raise still_pausing from exc
+        except SandboxTimeoutError:
+            # The request outlived its own timeout; the pause may still land.
+            # Follow it through the sandbox's status like an accepted one.
+            raw = {"status": "pausing"}
         if not (isinstance(raw, dict) and raw.get("status") == "pausing"):
             return
         while True:
