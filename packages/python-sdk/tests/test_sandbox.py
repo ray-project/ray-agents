@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import time
+
+import threading
+
+import http.server
+
 from types import SimpleNamespace
 
 import json
@@ -963,18 +969,43 @@ def test_pause_deadline_bounds_a_slowly_dripped_poll_body(monkeypatch):
             sbx._close_http_client()
 
 
-def test_read_timeout_follows_the_remaining_budget(monkeypatch):
-    clock = [10.0]
-    monkeypatch.setattr(
-        http_module,
-        "time",
-        SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda n: None),
-    )
-    request = httpx.Request(
-        "GET", f"{API}/sandboxes/sbx-1", extensions={"timeout": {"read": 30.0}}
-    )
-    http_module._tighten_read_timeout(request, deadline=10.4)
-    assert request.extensions["timeout"]["read"] == pytest.approx(0.4)
-    clock[0] = 11.0
-    http_module._tighten_read_timeout(request, deadline=10.4)
-    assert request.extensions["timeout"]["read"] == pytest.approx(0.001)
+def test_sync_read_deadline_cuts_a_stalled_body() -> None:
+    body = json.dumps(_raw(status="paused")).encode()
+
+    class Stall(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body[:4])
+            self.wfile.flush()
+            time.sleep(2.0)  # the peer goes quiet mid-body
+            try:
+                self.wfile.write(body[4:])
+            except OSError:
+                pass
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Stall)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    client = httpx.Client()
+    try:
+        started = time.monotonic()
+        with pytest.raises(SandboxTimeoutError):
+            http_module._read_within(
+                client,
+                "GET",
+                f"http://127.0.0.1:{server.server_port}/sandboxes/sbx-1",
+                headers={},
+                json_body=None,
+                timeout=30.0,
+                deadline=time.monotonic() + 0.2,
+            )
+        assert time.monotonic() - started < 1.5
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()

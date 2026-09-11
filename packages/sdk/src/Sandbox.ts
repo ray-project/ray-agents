@@ -398,6 +398,8 @@ export class Sandbox {
           // Gone while pausing: auto-delete on pause removes the sandbox as
           // soon as the pause lands, so there is nothing left to wait for.
           if (err instanceof NotFoundError) return
+          // One slow poll; the operation deadline decides whether to go on.
+          if (err instanceof TimeoutError && !deadline.signal.aborted) continue
           throw err
         }
         if (deadline.signal.aborted) throw stillPausing()

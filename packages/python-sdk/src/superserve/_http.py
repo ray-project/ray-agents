@@ -7,6 +7,7 @@ connection pooling and retry logic for idempotent methods (GET, DELETE).
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from asyncio import wait_for as _wait_for
 import json as json_module
 import random
@@ -174,14 +175,6 @@ def _check_deadline(deadline: float | None) -> None:
         raise DeadlineExceeded("Operation deadline exceeded")
 
 
-def _tighten_read_timeout(request: httpx.Request, deadline: float) -> None:
-    """Bound the next socket read to what is left of the deadline; the
-    transport consults the request's timeout extension on every read."""
-    ext = request.extensions.get("timeout")
-    if isinstance(ext, dict):
-        ext["read"] = max(deadline - time.monotonic(), 0.001)
-
-
 def _read_within(
     client: httpx.Client,
     method: str,
@@ -202,16 +195,25 @@ def _read_within(
     with client.stream(
         method, url, headers=headers, json=json_body, timeout=timeout
     ) as streamed:
+        # A blocking read cannot be re-timed or interrupted once the body has
+        # started, so the body is read on a worker and the caller waits only
+        # for what is left of the deadline; a worker that outlives it winds
+        # down on its own read timeout.
         parts: list[bytes] = []
-        chunks = streamed.iter_bytes()
-        while True:
-            _tighten_read_timeout(streamed.request, deadline)
-            try:
-                chunk = next(chunks)
-            except StopIteration:
-                break
-            parts.append(chunk)
-            _check_deadline(deadline)
+
+        def drain() -> None:
+            for chunk in streamed.iter_bytes():
+                parts.append(chunk)
+                _check_deadline(deadline)
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            pool.submit(drain).result(timeout=max(deadline - time.monotonic(), 0.0))
+        except concurrent.futures.TimeoutError as exc:
+            streamed.close()
+            raise DeadlineExceeded("Operation deadline exceeded") from exc
+        finally:
+            pool.shutdown(wait=False)
         return httpx.Response(
             streamed.status_code,
             headers=streamed.headers,
@@ -244,7 +246,6 @@ async def _async_read_within(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise DeadlineExceeded("Operation deadline exceeded")
-            _tighten_read_timeout(streamed.request, deadline)
             try:
                 chunk = await _wait_for(chunks.__anext__(), remaining)
             except StopAsyncIteration:
