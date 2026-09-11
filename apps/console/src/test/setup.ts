@@ -25,3 +25,22 @@ process.env.SANDBOX_API_URL = "https://api.test.superserve.ai"
 process.env.NEXT_PUBLIC_SANDBOX_HOST = "sandbox.test.superserve.ai"
 process.env.CONSOLE_PROXY_SECRET =
   "test-secret-must-be-at-least-thirty-two-chars-long-abcdef"
+
+// happy-dom does not expose storage when no document URL is configured.
+// Provide the minimal Web Storage contract used by console tests.
+if (typeof window !== "undefined" && !window.localStorage) {
+  const values = new Map<string, string>()
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, String(value)),
+      removeItem: (key: string) => values.delete(key),
+      clear: () => values.clear(),
+      key: (index: number) => Array.from(values.keys())[index] ?? null,
+      get length() {
+        return values.size
+      },
+    },
+  })
+}

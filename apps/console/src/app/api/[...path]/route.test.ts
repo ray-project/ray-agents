@@ -86,6 +86,24 @@ describe("api proxy /api/[...path]", () => {
     expect(res.status).toBe(404)
   })
 
+  it("forwards the billing usage-series endpoint", async () => {
+    fetchSpy.mockResolvedValue(new Response("{}", { status: 200 }))
+
+    const request = new NextRequest(
+      new URL(
+        "https://console.test/api/billing/usage-series?start=2026-01-01T00%3A00%3A00.000Z&end=2026-01-02T00%3A00%3A00.000Z&granularity=hour&timezone=UTC",
+      ),
+      { method: "GET" },
+    )
+    const res = await GET(request, params(["billing", "usage-series"]))
+
+    expect(res.status).toBe(200)
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://api.test.superserve.ai/billing/usage-series?start=2026-01-01T00%3A00%3A00.000Z&end=2026-01-02T00%3A00%3A00.000Z&granularity=hour&timezone=UTC",
+      expect.objectContaining({ method: "GET" }),
+    )
+  })
+
   it("forwards the secrets, providers, activity, and billing prefixes", async () => {
     fetchSpy.mockImplementation(() =>
       Promise.resolve(
